@@ -82,6 +82,10 @@ impl ObjectStore {
         Self { vault }
     }
 
+    pub(crate) fn vault(&self) -> &Vault {
+        &self.vault
+    }
+
     pub fn put(&self, bytes: &[u8], mime_type: &str) -> Result<StoredObject, ObjectStoreError> {
         self.put_reader(bytes, mime_type)
     }

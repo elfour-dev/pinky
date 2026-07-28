@@ -7,9 +7,10 @@ use std::{
 };
 
 use pinky_core::{
-    create_registered_vault, read_registration, unlock_registered_vault, GocryptfsMount,
-    LocalFileFingerprint, LocalIngestor, LocalWatchTarget, ObjectStore, OnboardedVault,
-    SourceSummary, SystemVaultPlatform, TaskJournal, TaskManager, VaultPaths, VaultRegistration,
+    create_registered_vault, read_registration, unlock_registered_vault, CitationPassage,
+    GocryptfsMount, LocalFileFingerprint, LocalIngestor, LocalWatchTarget, ObjectStore,
+    OnboardedVault, RetrievalService, SearchHit, SourceSummary, SystemVaultPlatform, TaskJournal,
+    TaskManager, VaultPaths, VaultRegistration,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -363,6 +364,25 @@ fn local_ingestor(runtime: &AppRuntime) -> Result<LocalIngestor, String> {
     ))
 }
 
+fn retrieval_service(runtime: &AppRuntime) -> Result<RetrievalService, String> {
+    let data = runtime
+        .data
+        .lock()
+        .map_err(|_| "runtime lock is poisoned".to_owned())?;
+    let vault = data
+        .vault
+        .as_ref()
+        .ok_or_else(|| "the encrypted vault is not unlocked".to_owned())?;
+    vault
+        .vault
+        .ensure_mounted()
+        .map_err(|error| error.to_string())?;
+    Ok(RetrievalService::new(
+        vault.database.clone(),
+        ObjectStore::new(vault.vault.clone()),
+    ))
+}
+
 struct PendingObservation {
     fingerprint: LocalFileFingerprint,
     first_seen: Instant,
@@ -654,6 +674,52 @@ fn list_sources(runtime: State<'_, AppRuntime>) -> Result<Vec<SourceSummary>, St
 }
 
 #[tauri::command]
+async fn search_sources(
+    query: String,
+    limit: Option<usize>,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<Vec<SearchHit>, String> {
+    if query.trim().is_empty() {
+        return Err("enter a search query".to_owned());
+    }
+    let retrieval = retrieval_service(runtime.inner())?;
+    let limit = limit.unwrap_or(8).clamp(1, 12);
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tasks.spawn("lexical retrieval", None, move |mut context| async move {
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "lexical retrieval",
+            Some(0.15),
+            "Searching retained source passages",
+        );
+        let outcome = tauri::async_runtime::spawn_blocking(move || retrieval.search(&query, limit))
+            .await
+            .map_err(|error| format!("retrieval worker failed: {error}"))
+            .and_then(|result| result.map_err(|error| error.to_string()));
+        let task_result = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
+        let _ = sender.send(outcome);
+        task_result
+    });
+    receiver
+        .await
+        .map_err(|_| "retrieval task ended without a result".to_owned())?
+}
+
+#[tauri::command]
+fn open_citation(
+    citation_uri: String,
+    runtime: State<'_, AppRuntime>,
+) -> Result<CitationPassage, String> {
+    retrieval_service(runtime.inner())?
+        .open_citation(&citation_uri)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn cancel_task(task_id: String, tasks: State<'_, TaskManager>) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "invalid task UUID".to_owned())?;
     if tasks.cancel(id) {
@@ -874,6 +940,8 @@ pub fn run() {
             start_system_check,
             ingest_local_file,
             list_sources,
+            search_sources,
+            open_citation,
             cancel_task,
             pause_task,
             cancel_all_tasks,

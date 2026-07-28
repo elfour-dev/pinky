@@ -27,7 +27,8 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Cross-source object deduplication and symlink-escape rejection
 - [x] Stable-change local-file watching, automatic re-versioning, and missing-file state
 - [ ] PDF, office, image/OCR, and isolated-worker extractors
-- [ ] Tantivy, Qdrant, and citation viewer
+- [x] Encrypted Tantivy lexical index and exact retained-version citation viewer
+- [ ] Qdrant vector retrieval and hybrid rank fusion
 - [ ] Model onboarding, hybrid retrieval, cited chat, claims, and dossiers
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
 - [ ] Workspace snapshots, permissions, Podman tools, and app generation
@@ -68,6 +69,17 @@ Failed or cancelled replacements leave the previous current version active and
 retry after a bounded cooldown. Deletions mark the source `missing` while
 retaining its current version and archived objects; reappearance schedules a
 new version after the same stability checks.
+
+Extracted chunks are indexed by Tantivy inside the mounted encrypted vault.
+Ingestion commits an index version before moving the relational current-version
+pointer, while search filters out superseded versions by default. A count
+mismatch rebuilds the generated lexical index from retained chunk objects, so
+sources ingested by earlier builds become searchable without reading the
+original local file again. The desktop composer performs lexical retrieval and
+opens exact `pinky://source/.../version/...#chunk-...` citations with retained
+passage text, source provenance, coordinates, and retrieval time. Qdrant,
+reranking, answer generation, and cited conversational responses remain later
+slices.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and

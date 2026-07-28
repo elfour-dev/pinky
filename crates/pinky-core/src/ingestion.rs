@@ -14,7 +14,10 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{Database, ObjectStore, ObjectStoreError, StoredObject};
+use crate::{
+    Database, IndexedChunk, ObjectStore, ObjectStoreError, RetrievalError, RetrievalService,
+    StoredObject,
+};
 
 const EXTRACTION_VERSION: &str = "pinky-text-v1";
 const TARGET_TOKENS: usize = 500;
@@ -43,6 +46,8 @@ pub enum IngestionError {
     Database(#[from] rusqlite::Error),
     #[error("ingestion serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("ingestion retrieval index error: {0}")]
+    Retrieval(#[from] RetrievalError),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -289,8 +294,10 @@ impl LocalIngestor {
                 "{}",
             ],
         )?;
+        let mut indexed_chunks = Vec::with_capacity(chunks.len());
         for (ordinal, (chunk, stored)) in chunks.iter().enumerate() {
             check_cancelled(&cancellation)?;
+            let chunk_id = Uuid::new_v4();
             transaction.execute(
                 "INSERT INTO chunks (
                     id, source_version_id, ordinal, heading_path, character_start,
@@ -298,7 +305,7 @@ impl LocalIngestor {
                     extracted_text_hash, embedding_id
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
                 params![
-                    Uuid::new_v4().to_string(),
+                    chunk_id.to_string(),
                     version_id.to_string(),
                     ordinal as i64,
                     chunk.heading,
@@ -315,7 +322,19 @@ impl LocalIngestor {
                     stored.metadata.sha256,
                 ],
             )?;
+            indexed_chunks.push(IndexedChunk {
+                chunk_id,
+                source_id,
+                version_id,
+                ordinal: ordinal as u64,
+                display_name: display_name.clone(),
+                heading: chunk.heading.clone(),
+                body: chunk.text.clone(),
+            });
         }
+        check_cancelled(&cancellation)?;
+        RetrievalService::new(self.database.clone(), self.objects.clone())
+            .index_version(version_id, &indexed_chunks)?;
         check_cancelled(&cancellation)?;
         transaction.execute(
             "UPDATE sources

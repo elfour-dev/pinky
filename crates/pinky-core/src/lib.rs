@@ -10,6 +10,7 @@ pub mod object_store;
 pub mod onboarding;
 pub mod process;
 pub mod recovery;
+pub mod retrieval;
 pub mod task;
 pub mod task_journal;
 pub mod vault;
@@ -29,6 +30,7 @@ pub use onboarding::{
 };
 pub use process::{ProcessError, ProcessOutcome, ProcessSupervisor, ProcessTermination};
 pub use recovery::{RecoveryEnvelope, RecoveryError, VaultKey, VaultSubkeys};
+pub use retrieval::{CitationPassage, IndexedChunk, RetrievalError, RetrievalService, SearchHit};
 pub use task::{TaskEvent, TaskManager, TaskPhase, TaskState};
 pub use task_journal::{TaskJournal, TaskJournalError};
 pub use vault::{MountVerifier, ProcMountVerifier, Vault, VaultError};

@@ -26,18 +26,21 @@ The executable stage-one foundation currently includes:
   overlapping chunks, deduplication, and symlink-escape protection;
 - automatic stable-file refresh after vault unlock, preserving the previous
   version on failed replacement and marking deleted files as missing;
+- an encrypted Tantivy lexical index, automatic rebuild from retained chunks,
+  source search, and exact retained-version citation reopening;
 - a three-region UI, live xterm event log, task controls, and a Three.js entity
   driven by task state, including reduced motion and a non-WebGL fallback.
 
 Live core acceptance now covers real gocryptfs creation, Secret Service key
 storage, unmounting, restart-time unlocking, and encrypted object recovery on
 the target host. Native compilation, WebDriver end-to-end checks, Linux bundle
-inspection, and clean Debian package installation now pass. The first local
-text-ingestion slice is usable from the Sources panel. Additional extractors,
-retrieval indexes, models, research, generated-code containers, image
-generation, backup/restore, and the later release gates remain unimplemented.
-Chat controls are visibly disabled until retrieval and the local model runtime
-exist; retained-data operations remain disabled while the vault is unavailable.
+inspection, and clean Debian package installation now pass. The local
+text-ingestion and lexical-search slices are usable from the Sources panel and
+composer. Additional extractors, vector retrieval, models, research,
+generated-code containers, image generation, backup/restore, and the later
+release gates remain unimplemented. The composer searches retained evidence but
+does not yet synthesize chat answers; that requires the local model runtime.
+Retained-data operations remain disabled while the vault is unavailable.
 
 ## Development
 
@@ -70,6 +73,8 @@ npm run tauri dev
 After unlocking the vault, choose **Add source**, enter an approved directory,
 and enter the absolute path of a file inside it. Pinky archives the exact opened
 file in the encrypted vault and shows ingestion progress in the task panel.
+Enter terms in the centre composer to search retained passages. Open a result's
+citation to inspect the exact archived source version and provenance.
 
 On Debian 13, install the native build and headless WebDriver prerequisites
 before running the Stage 1 desktop acceptance suite:

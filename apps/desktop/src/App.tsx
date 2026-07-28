@@ -6,7 +6,7 @@ import { Terminal } from "@xterm/xterm";
 import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
-import type { RuntimeStatus, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import type { CitationPassage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
 
 const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, watcher_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
@@ -34,6 +34,10 @@ export function App() {
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [message, setMessage] = useState("");
+  const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
+  const [searchError, setSearchError] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [citation, setCitation] = useState<CitationPassage | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupPaths, setSetupPaths] = useState<VaultPaths>({ cipher_dir: "", mount_dir: "" });
   const [passphrase, setPassphrase] = useState("");
@@ -97,9 +101,21 @@ export function App() {
     const ids = [...demoTimers.keys()]; demoTimers.clear();
     setEvents((current) => [...current, ...ids.map((id) => cancelledPreview(current, id))]);
   };
-  const submit = (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
-    setMessage("");
+    const query = message.trim();
+    if (!query || !IS_TAURI || !status.vault_mounted) return;
+    setSearchError(""); setSearching(true);
+    try {
+      setSearchHits(await invoke<SearchHit[]>("search_sources", { query, limit: 8 }));
+    } catch (error) { setSearchError(String(error)); }
+    finally { setSearching(false); }
+  };
+  const showCitation = async (uri: string) => {
+    if (!IS_TAURI) return;
+    setSearchError("");
+    try { setCitation(await invoke<CitationPassage>("open_citation", { citationUri: uri })); }
+    catch (error) { setSearchError(String(error)); }
   };
   const closeSetup = () => {
     if (setupRunning) return;
@@ -173,16 +189,18 @@ export function App() {
     </aside>
 
     <section className="centre-panel" id="conversation" aria-label="Conversation">
-      <div className="topbar"><div className="crumb">New conversation <ChevronRight size={13} /> <span>Local only</span></div><button className="icon-button" aria-label="Search" disabled title="Search is implemented in the retrieval stage"><Search size={16} /></button></div>
+      <div className="topbar"><div className="crumb">Retained knowledge <ChevronRight size={13} /> <span>Lexical search</span></div><button className="icon-button" aria-label="Search retained sources" title="Search retained sources"><Search size={16} /></button></div>
       <div className="conversation">
         <div className="entity-stage"><AsciiEntity state={entityState} reducedMotion={reducedMotion} /><span className={`state-pill ${entityState}`} aria-live="polite"><i /> {entityState}</span></div>
         <div className="welcome"><p className="eyebrow">ENCRYPTED · LOCAL · SOURCE-GROUNDED</p><h1>What should we understand<br />or create?</h1><p>Pinky retains approved evidence inside your encrypted vault and shows every operation while it works.</p></div>
         {!status.vault_mounted && (status.vault_registered ? <div className="blocking-question" role="alert"><KeyRound size={19} /><div><strong>{status.setup_in_progress ? "Unlocking your encrypted vault" : "Your registered vault is locked"}</strong><p>{status.unlock_error || "Pinky is retrieving its protected key from Linux Secret Service."}</p></div><button disabled={status.setup_in_progress || !status.prerequisites.gocryptfs || !status.prerequisites.secret_service} onClick={retryUnlock}>{status.setup_in_progress ? "Unlocking…" : "Retry unlock"}</button></div> : <div className="blocking-question" role="alert"><FolderKey size={19} /><div><strong>Set up the encrypted vault to begin</strong><p>Ingestion, conversations, generation, and logs stay disabled until gocryptfs and Secret Service are ready.</p></div><button onClick={openSetup}>Start setup</button></div>)}
-        {status.vault_mounted && <div className="capability-notice"><Database size={17} /><div><strong>Local text ingestion is ready</strong><p>Add an approved text, Markdown, JSON, YAML, XML, CSV, log, or source-code file. Chat remains disabled until retrieval and the local model runtime are implemented.</p></div><button onClick={openSource}>Add source</button></div>}
+        {status.vault_mounted && !searchHits.length && <div className="capability-notice"><Database size={17} /><div><strong>Encrypted source search is ready</strong><p>Add local text sources, then search their retained passages below. Cited chat will follow when the local model runtime is connected.</p></div><button onClick={openSource}>Add source</button></div>}
+        {searchError && <p className="search-error" role="alert">{searchError}</p>}
+        {!!searchHits.length && <section className="search-results" aria-label="Retained source search results"><header><p className="eyebrow">MATCHING EVIDENCE</p><span>{searchHits.length} passage{searchHits.length === 1 ? "" : "s"}</span></header>{searchHits.map((hit) => <article key={hit.chunk_id}><div><FileText size={14} /><strong>{hit.display_name}</strong>{hit.heading && <span>{hit.heading}</span>}</div><p>{hit.passage}</p><button onClick={() => void showCitation(hit.citation_uri)}>{formatCoordinates(hit.coordinates)} · Open retained citation</button></article>)}</section>}
       </div>
       <form className="composer" onSubmit={submit}>
-        <textarea aria-label="Message Pinky" value={message} onChange={(event) => setMessage(event.target.value)} onFocus={() => setListening(true)} onBlur={() => setListening(false)} placeholder={status.vault_mounted ? "Chat unlocks after retrieval and local model setup…" : "Unlock the encrypted vault to start…"} disabled />
-        <div className="composer-footer"><div><button type="button" className="tool-chip" disabled={!status.vault_mounted} onClick={openSource}><Plus size={14} /> Attach source</button><span>{status.vault_mounted ? "Chat not implemented yet" : "Encrypted vault required"}</span></div><button className="send" aria-label="Send message" disabled>↑</button></div>
+        <textarea aria-label="Search retained sources" value={message} onChange={(event) => setMessage(event.target.value)} onFocus={() => setListening(true)} onBlur={() => setListening(false)} placeholder={status.vault_mounted ? "Search your retained sources…" : "Unlock the encrypted vault to start…"} disabled={!status.vault_mounted || searching} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+        <div className="composer-footer"><div><button type="button" className="tool-chip" disabled={!status.vault_mounted} onClick={openSource}><Plus size={14} /> Attach source</button><span>{status.vault_mounted ? "Lexical retrieval · exact citations" : "Encrypted vault required"}</span></div><button className="send" aria-label="Search" disabled={!status.vault_mounted || searching || !message.trim()}>{searching ? "…" : "↑"}</button></div>
       </form>
     </section>
 
@@ -229,7 +247,19 @@ export function App() {
         </form>
       </section>
     </div>}
+    {citation && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setCitation(null); }}>
+      <section className="setup-modal citation-modal" role="dialog" aria-modal="true" aria-labelledby="citation-title">
+        <header><div><p className="eyebrow">RETAINED SOURCE SNAPSHOT</p><h2 id="citation-title">{citation.display_name}</h2></div><button aria-label="Close citation" onClick={() => setCitation(null)}><X size={17} /></button></header>
+        <div className="citation-provenance"><span>{citation.mime_type}</span><span>{formatCoordinates(citation.coordinates)}</span><span>Retrieved {new Date(citation.retrieved_at).toLocaleString()}</span></div>
+        <pre>{citation.passage}</pre><code>{citation.citation_uri}</code><p className="citation-origin" title={citation.canonical_uri}>{citation.canonical_uri}</p>
+      </section>
+    </div>}
   </main>;
+}
+
+function formatCoordinates(coordinates: SearchHit["coordinates"]) {
+  if (!coordinates?.line_start) return "Chunk passage";
+  return coordinates.line_start === coordinates.line_end ? `Line ${coordinates.line_start}` : `Lines ${coordinates.line_start}–${coordinates.line_end}`;
 }
 
 function NavGroup({ icon, label, count, children }: { icon: React.ReactNode; label: string; count: string; children?: React.ReactNode }) {

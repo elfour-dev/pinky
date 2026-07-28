@@ -28,3 +28,20 @@ export interface SourceSummary {
   state: string;
   updated_at: string;
 }
+export interface SearchHit {
+  score: number;
+  citation_uri: string;
+  source_id: string;
+  version_id: string;
+  chunk_id: string;
+  ordinal: number;
+  display_name: string;
+  heading: string | null;
+  passage: string;
+  coordinates: { line_start?: number; line_end?: number } | null;
+  retrieved_at: string;
+}
+export interface CitationPassage extends Omit<SearchHit, "score"> {
+  canonical_uri: string;
+  mime_type: string;
+}
