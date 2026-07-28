@@ -60,6 +60,30 @@ cd apps/desktop
 npm run tauri dev
 ```
 
+On Debian 13, install the native build and headless WebDriver prerequisites
+before running the Stage 1 desktop acceptance suite:
+
+```bash
+sudo apt-get install -y pkg-config libdbus-1-dev libwebkit2gtk-4.1-dev \
+  libgtk-3-dev librsvg2-dev patchelf webkit2gtk-driver xvfb
+cargo install tauri-driver --locked
+cd apps/desktop
+npm run test:e2e
+```
+
+The E2E runner uses an isolated XDG profile and drives the compiled Tauri
+application through WebKit WebDriver. It verifies the native three-region
+shell, the default-vault-path command, task events, and cancellation. It has no
+third-party Node dependencies. Linux bundle creation and inspection run with:
+
+```bash
+npm run bundle:linux
+npm run verify:bundle
+```
+
+The clean-machine version of these checks is defined in
+`.github/workflows/stage-one.yml`.
+
 Production onboarding will additionally require gocryptfs, Linux Secret Service,
 rootless Podman, and Vulkan. Pinky will never treat a normal directory as an
 encrypted vault.

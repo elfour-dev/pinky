@@ -38,6 +38,15 @@ later WebKit/GTK development packages may also be required. Installing host
 packages was outside this implementation run, so native end-to-end testing
 remains an unchecked stage-one gate.
 
+A dependency-free WebDriver protocol harness and a clean-machine Linux workflow
+now define that remaining gate. The harness uses an isolated XDG profile and
+checks the compiled WebKit application shell, a real Tauri path command, task
+events, and cancellation. Bundle inspection validates the Debian architecture
+and installed files, extracts the AppImage without FUSE, verifies its runtime
+layout, and prints SHA-256 artifact metadata. These checks are implemented but
+not marked accepted here because installing the remaining native packages
+requires an interactive sudo password unavailable to this session.
+
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and
 failure rollback. The opt-in target-host acceptance test also passed with real

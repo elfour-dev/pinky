@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:native:test": "tauri build --debug --no-bundle",
+    "bundle:linux": "tauri build --bundles deb,appimage",
     "test": "vitest run",
+    "test:e2e": "npm run build:native:test && xvfb-run -a npm --prefix e2e test",
+    "verify:bundle": "node scripts/verify-linux-bundle.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
