@@ -8,8 +8,8 @@ use std::{
 
 use pinky_core::{
     create_registered_vault, read_registration, unlock_registered_vault, GocryptfsMount,
-    ObjectStore, OnboardedVault, SystemVaultPlatform, TaskJournal, TaskManager, VaultPaths,
-    VaultRegistration,
+    LocalIngestor, ObjectStore, OnboardedVault, SourceSummary, SystemVaultPlatform, TaskJournal,
+    TaskManager, VaultPaths, VaultRegistration,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -64,6 +64,12 @@ struct SetupVaultRequest {
     cipher_dir: PathBuf,
     mount_dir: PathBuf,
     recovery_passphrase: String,
+}
+
+#[derive(Deserialize)]
+struct IngestLocalFileRequest {
+    approved_root: PathBuf,
+    source_path: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -327,6 +333,75 @@ async fn start_system_check(tasks: State<'_, TaskManager>) -> Result<String, Str
         .to_string())
 }
 
+fn local_ingestor(runtime: &AppRuntime) -> Result<LocalIngestor, String> {
+    let data = runtime
+        .data
+        .lock()
+        .map_err(|_| "runtime lock is poisoned".to_owned())?;
+    let vault = data
+        .vault
+        .as_ref()
+        .ok_or_else(|| "the encrypted vault is not unlocked".to_owned())?;
+    vault
+        .vault
+        .ensure_mounted()
+        .map_err(|error| error.to_string())?;
+    Ok(LocalIngestor::new(
+        vault.database.clone(),
+        ObjectStore::new(vault.vault.clone()),
+    ))
+}
+
+#[tauri::command]
+async fn ingest_local_file(
+    request: IngestLocalFileRequest,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<String, String> {
+    let ingestor = local_ingestor(runtime.inner())?;
+    let task_id = tasks.spawn("local ingestion", None, move |mut context| async move {
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "local ingestion",
+            Some(0.1),
+            "Validating approved path and archiving source",
+        );
+        let cancellation = context.cancellation_token();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            ingestor.ingest_cancellable(request.approved_root, request.source_path, cancellation)
+        })
+        .await
+        .map_err(|error| format!("ingestion worker failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "local ingestion",
+            Some(0.95),
+            format!(
+                "Retained {} bytes in {} chunk{}",
+                result.byte_size,
+                result.chunk_count,
+                if result.chunk_count == 1 { "" } else { "s" }
+            ),
+        );
+        Ok(())
+    });
+    Ok(task_id.to_string())
+}
+
+#[tauri::command]
+fn list_sources(runtime: State<'_, AppRuntime>) -> Result<Vec<SourceSummary>, String> {
+    local_ingestor(runtime.inner())?
+        .list_sources()
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn cancel_task(task_id: String, tasks: State<'_, TaskManager>) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "invalid task UUID".to_owned())?;
@@ -410,6 +485,8 @@ pub fn run() {
             setup_vault,
             unlock_vault,
             start_system_check,
+            ingest_local_file,
+            list_sources,
             cancel_task,
             pause_task,
             cancel_all_tasks,

@@ -1,0 +1,666 @@
+use std::{
+    fs::{self, OpenOptions},
+    io::{Read, Seek, SeekFrom},
+    os::fd::AsRawFd,
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+use chrono::Utc;
+use rusqlite::{params, OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use crate::{Database, ObjectStore, ObjectStoreError, StoredObject};
+
+const EXTRACTION_VERSION: &str = "pinky-text-v1";
+const TARGET_TOKENS: usize = 500;
+const OVERLAP_TOKENS: usize = 75;
+const MAX_TEXT_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug, Error)]
+pub enum IngestionError {
+    #[error("cancelled")]
+    Cancelled,
+    #[error("approved root must be an existing directory: {0}")]
+    InvalidApprovedRoot(PathBuf),
+    #[error("source path is outside the approved root")]
+    OutsideApprovedRoot,
+    #[error("source must be a regular file: {0}")]
+    NotRegularFile(PathBuf),
+    #[error("source path has no displayable file name")]
+    MissingFileName,
+    #[error("ingestion database lock is poisoned")]
+    DatabaseLock,
+    #[error("ingestion I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("ingestion object error: {0}")]
+    Object(#[from] ObjectStoreError),
+    #[error("ingestion database error: {0}")]
+    Database(#[from] rusqlite::Error),
+    #[error("ingestion serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IngestedSource {
+    pub source_id: Uuid,
+    pub version_id: Uuid,
+    pub display_name: String,
+    pub canonical_uri: String,
+    pub mime_type: String,
+    pub byte_size: u64,
+    pub chunk_count: usize,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSummary {
+    pub source_id: Uuid,
+    pub version_id: Uuid,
+    pub display_name: String,
+    pub canonical_uri: String,
+    pub mime_type: String,
+    pub byte_size: u64,
+    pub chunk_count: usize,
+    pub state: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone)]
+pub struct LocalIngestor {
+    database: Arc<Mutex<Database>>,
+    objects: ObjectStore,
+}
+
+impl LocalIngestor {
+    pub fn new(database: Arc<Mutex<Database>>, objects: ObjectStore) -> Self {
+        Self { database, objects }
+    }
+
+    pub fn ingest(
+        &self,
+        approved_root: impl AsRef<Path>,
+        source_path: impl AsRef<Path>,
+    ) -> Result<IngestedSource, IngestionError> {
+        self.ingest_cancellable(approved_root, source_path, CancellationToken::new())
+    }
+
+    pub fn ingest_cancellable(
+        &self,
+        approved_root: impl AsRef<Path>,
+        source_path: impl AsRef<Path>,
+        cancellation: CancellationToken,
+    ) -> Result<IngestedSource, IngestionError> {
+        check_cancelled(&cancellation)?;
+        let approved_root = fs::canonicalize(approved_root.as_ref())?;
+        if !fs::metadata(&approved_root)?.is_dir() {
+            return Err(IngestionError::InvalidApprovedRoot(approved_root));
+        }
+        let source_path = fs::canonicalize(source_path.as_ref())?;
+        if !source_path.starts_with(&approved_root) {
+            return Err(IngestionError::OutsideApprovedRoot);
+        }
+        let mut source_file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&source_path)?;
+        let opened_path = fs::canonicalize(format!("/proc/self/fd/{}", source_file.as_raw_fd()))?;
+        if opened_path != source_path || !opened_path.starts_with(&approved_root) {
+            return Err(IngestionError::OutsideApprovedRoot);
+        }
+        let source_path = opened_path;
+        let metadata = source_file.metadata()?;
+        if !metadata.is_file() {
+            return Err(IngestionError::NotRegularFile(source_path));
+        }
+
+        let display_name = source_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .ok_or(IngestionError::MissingFileName)?;
+        let canonical_uri = file_uri(&source_path);
+        let mut prefix = [0_u8; 512];
+        let prefix_length = source_file.read(&mut prefix)?;
+        source_file.seek(SeekFrom::Start(0))?;
+        let mime_type = detect_mime(&source_path, &prefix[..prefix_length]);
+        let original_result = self.objects.put_reader(
+            CancellableReader::new(source_file, cancellation.clone()),
+            &mime_type,
+        );
+        check_cancelled(&cancellation)?;
+        let original = original_result?;
+        let byte_size = original.metadata.uncompressed_length;
+
+        let extraction = if is_supported_text(&mime_type) && byte_size <= MAX_TEXT_BYTES {
+            let bytes = self.objects.read_verified(&original.metadata.sha256)?;
+            String::from_utf8(bytes)
+                .ok()
+                .map(|text| normalize_text(&text))
+        } else {
+            None
+        };
+        let state = if extraction.is_some() {
+            "active"
+        } else {
+            "unsupported"
+        };
+        let processing_state = if extraction.is_some() {
+            "ready"
+        } else {
+            "unsupported"
+        };
+        let extraction_error = if extraction.is_some() {
+            None
+        } else if byte_size > MAX_TEXT_BYTES && is_supported_text(&mime_type) {
+            Some(format!(
+                "text extraction limit exceeded ({byte_size} bytes; maximum {MAX_TEXT_BYTES})"
+            ))
+        } else {
+            Some("format is archived but not yet extractable".to_owned())
+        };
+
+        let extracted = extraction
+            .as_ref()
+            .map(|text| self.objects.put(text.as_bytes(), "text/plain"))
+            .transpose()?;
+        let mut chunks = Vec::new();
+        if let Some(text) = extraction.as_deref() {
+            for chunk in chunk_text(text) {
+                check_cancelled(&cancellation)?;
+                let stored = self.objects.put(chunk.text.as_bytes(), "text/plain")?;
+                chunks.push((chunk, stored));
+            }
+        }
+
+        check_cancelled(&cancellation)?;
+        let source_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339();
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| IngestionError::DatabaseLock)?;
+        let transaction = database.connection().unchecked_transaction()?;
+        record_object(&transaction, &original, 1)?;
+        if let Some(extracted) = extracted.as_ref() {
+            record_object(&transaction, extracted, 1)?;
+        }
+        for (_, stored) in &chunks {
+            check_cancelled(&cancellation)?;
+            record_object(&transaction, stored, 1)?;
+        }
+
+        let existing: Option<(String, Option<String>)> = transaction
+            .query_row(
+                "SELECT id, current_version_id FROM sources WHERE canonical_uri = ?1",
+                [&canonical_uri],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let (source_id, previous_version) = match existing {
+            Some((id, current)) => (
+                Uuid::parse_str(&id).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                current,
+            ),
+            None => (source_id, None),
+        };
+        transaction.execute(
+            "INSERT INTO sources (
+                id, kind, canonical_uri, display_name, approval_scope, current_version_id,
+                refresh_policy, authority_tier, created_at, updated_at, last_checked_at, state
+             ) VALUES (?1, 'local_file', ?2, ?3, ?4, NULL, 'filesystem_event', 1, ?5, ?5, ?5, ?6)
+             ON CONFLICT(canonical_uri) DO UPDATE SET
+                display_name = excluded.display_name,
+                approval_scope = excluded.approval_scope,
+                updated_at = excluded.updated_at,
+                last_checked_at = excluded.last_checked_at",
+            params![
+                source_id.to_string(),
+                canonical_uri,
+                display_name,
+                approved_root.to_string_lossy(),
+                now,
+                state,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO source_versions (
+                id, source_id, original_object_hash, extracted_object_hash, mime_type,
+                detected_language, byte_size, extraction_method, extraction_version,
+                retrieved_at, superseded_version_id, processing_state, error, citation_map_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                version_id.to_string(),
+                source_id.to_string(),
+                original.metadata.sha256,
+                extracted
+                    .as_ref()
+                    .map(|object| object.metadata.sha256.as_str()),
+                mime_type,
+                byte_size,
+                extraction.as_ref().map(|_| "builtin_text"),
+                extraction.as_ref().map(|_| EXTRACTION_VERSION),
+                now,
+                previous_version,
+                processing_state,
+                extraction_error,
+                "{}",
+            ],
+        )?;
+        for (ordinal, (chunk, stored)) in chunks.iter().enumerate() {
+            check_cancelled(&cancellation)?;
+            transaction.execute(
+                "INSERT INTO chunks (
+                    id, source_version_id, ordinal, heading_path, character_start,
+                    character_end, byte_start, byte_end, coordinates_json, token_count,
+                    extracted_text_hash, embedding_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    version_id.to_string(),
+                    ordinal as i64,
+                    chunk.heading,
+                    chunk.character_start as i64,
+                    chunk.character_end as i64,
+                    chunk.byte_start as i64,
+                    chunk.byte_end as i64,
+                    serde_json::json!({
+                        "line_start": chunk.line_start,
+                        "line_end": chunk.line_end,
+                    })
+                    .to_string(),
+                    chunk.token_count as i64,
+                    stored.metadata.sha256,
+                ],
+            )?;
+        }
+        check_cancelled(&cancellation)?;
+        transaction.execute(
+            "UPDATE sources
+             SET current_version_id = ?1, state = ?2, updated_at = ?3, last_checked_at = ?3
+             WHERE id = ?4",
+            params![version_id.to_string(), state, now, source_id.to_string()],
+        )?;
+        transaction.commit()?;
+
+        Ok(IngestedSource {
+            source_id,
+            version_id,
+            display_name,
+            canonical_uri,
+            mime_type,
+            byte_size,
+            chunk_count: chunks.len(),
+            state: state.to_owned(),
+        })
+    }
+
+    pub fn list_sources(&self) -> Result<Vec<SourceSummary>, IngestionError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| IngestionError::DatabaseLock)?;
+        let mut statement = database.connection().prepare(
+            "SELECT s.id, v.id, s.display_name, s.canonical_uri, v.mime_type, v.byte_size,
+                    (SELECT COUNT(*) FROM chunks c WHERE c.source_version_id = v.id),
+                    s.state, s.updated_at
+             FROM sources s
+             JOIN source_versions v ON v.id = s.current_version_id
+             WHERE s.kind = 'local_file' AND s.state != 'deleted'
+             ORDER BY s.updated_at DESC, s.display_name",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let source_id: String = row.get(0)?;
+            let version_id: String = row.get(1)?;
+            Ok(SourceSummary {
+                source_id: Uuid::parse_str(&source_id)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                version_id: Uuid::parse_str(&version_id)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                display_name: row.get(2)?,
+                canonical_uri: row.get(3)?,
+                mime_type: row.get(4)?,
+                byte_size: row.get::<_, i64>(5)? as u64,
+                chunk_count: row.get::<_, i64>(6)? as usize,
+                state: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+fn check_cancelled(cancellation: &CancellationToken) -> Result<(), IngestionError> {
+    if cancellation.is_cancelled() {
+        Err(IngestionError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+struct CancellableReader<R> {
+    inner: R,
+    cancellation: CancellationToken,
+}
+
+impl<R> CancellableReader<R> {
+    fn new(inner: R, cancellation: CancellationToken) -> Self {
+        Self {
+            inner,
+            cancellation,
+        }
+    }
+}
+
+impl<R: Read> Read for CancellableReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, std::io::Error> {
+        if self.cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "ingestion cancelled",
+            ));
+        }
+        self.inner.read(buffer)
+    }
+}
+
+fn record_object(
+    transaction: &Transaction<'_>,
+    object: &StoredObject,
+    references: i64,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        "INSERT INTO objects (
+            sha256, uncompressed_length, compressed_length, mime_type, compression_level
+         ) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(sha256) DO NOTHING",
+        params![
+            object.metadata.sha256,
+            object.metadata.uncompressed_length,
+            object.metadata.compressed_length,
+            object.metadata.mime_type,
+            object.metadata.compression_level,
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE objects SET reference_count = reference_count + ?1 WHERE sha256 = ?2",
+        params![references, object.metadata.sha256],
+    )?;
+    Ok(())
+}
+
+fn file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut uri = String::from("file://");
+    for byte in path.as_os_str().as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+            uri.push(*byte as char);
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri
+}
+
+fn detect_mime(path: &Path, prefix: &[u8]) -> String {
+    let signature = if prefix.starts_with(b"%PDF-") {
+        Some("application/pdf")
+    } else if prefix.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if prefix.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if prefix.starts_with(b"PK\x03\x04") {
+        Some("application/zip")
+    } else {
+        None
+    };
+    if let Some(signature) = signature {
+        return signature.to_owned();
+    }
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "md" | "markdown" => "text/markdown",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "yaml" | "yml" => "application/yaml",
+        "xml" => "application/xml",
+        "csv" => "text/csv",
+        "rs" => "text/x-rust",
+        "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" => "text/javascript",
+        "py" => "text/x-python",
+        "sh" | "bash" => "text/x-shellscript",
+        "txt" | "log" => "text/plain",
+        _ if !prefix.contains(&0) && std::str::from_utf8(prefix).is_ok() => "text/plain",
+        _ => "application/octet-stream",
+    }
+    .to_owned()
+}
+
+fn is_supported_text(mime_type: &str) -> bool {
+    mime_type.starts_with("text/")
+        || matches!(
+            mime_type,
+            "application/json" | "application/yaml" | "application/xml"
+        )
+}
+
+fn normalize_text(text: &str) -> String {
+    text.strip_prefix('\u{feff}')
+        .unwrap_or(text)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+}
+
+struct TextChunk {
+    text: String,
+    heading: Option<String>,
+    character_start: usize,
+    character_end: usize,
+    byte_start: usize,
+    byte_end: usize,
+    line_start: usize,
+    line_end: usize,
+    token_count: usize,
+}
+
+fn chunk_text(text: &str) -> Vec<TextChunk> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (index, character) in text.char_indices() {
+        if character.is_whitespace() {
+            if let Some(token_start) = start.take() {
+                tokens.push((token_start, index));
+            }
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(token_start) = start {
+        tokens.push((token_start, text.len()));
+    }
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut token_start = 0;
+    while token_start < tokens.len() {
+        let token_end = (token_start + TARGET_TOKENS).min(tokens.len());
+        let byte_start = tokens[token_start].0;
+        let byte_end = tokens[token_end - 1].1;
+        let preceding = &text[..byte_start];
+        let heading = preceding
+            .lines()
+            .rev()
+            .find(|line| line.trim_start().starts_with('#'))
+            .map(|line| line.trim().trim_start_matches('#').trim().to_owned())
+            .filter(|heading| !heading.is_empty());
+        chunks.push(TextChunk {
+            text: text[byte_start..byte_end].to_owned(),
+            heading,
+            character_start: text[..byte_start].chars().count(),
+            character_end: text[..byte_end].chars().count(),
+            byte_start,
+            byte_end,
+            line_start: preceding.bytes().filter(|byte| *byte == b'\n').count() + 1,
+            line_end: text[..byte_end]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1,
+            token_count: token_end - token_start,
+        });
+        if token_end == tokens.len() {
+            break;
+        }
+        token_start = token_end - OVERLAP_TOKENS;
+    }
+    chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{MountVerifier, Vault};
+    use std::fs::File;
+    use std::io::Write;
+
+    struct Mounted;
+    impl MountVerifier for Mounted {
+        fn is_gocryptfs_mount(&self, _: &Path) -> Result<bool, std::io::Error> {
+            Ok(true)
+        }
+    }
+
+    fn ingestor() -> (tempfile::TempDir, tempfile::TempDir, LocalIngestor) {
+        let vault_root = tempfile::tempdir().unwrap();
+        let approved_root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(vault_root.path(), Mounted).unwrap();
+        let database = Arc::new(Mutex::new(
+            Database::open(&vault, zeroize::Zeroizing::new(vec![0x51; 32])).unwrap(),
+        ));
+        let ingestor = LocalIngestor::new(database, ObjectStore::new(vault));
+        (vault_root, approved_root, ingestor)
+    }
+
+    #[test]
+    fn archives_extracts_chunks_and_versions_an_approved_text_file() {
+        let (_vault, approved, ingestor) = ingestor();
+        let source = approved.path().join("notes.md");
+        let mut file = File::create(&source).unwrap();
+        writeln!(file, "# Evidence\n\nPinky retains this statement.").unwrap();
+
+        let first = ingestor.ingest(approved.path(), &source).unwrap();
+        assert_eq!(first.state, "active");
+        assert_eq!(first.chunk_count, 1);
+        assert_eq!(ingestor.list_sources().unwrap().len(), 1);
+
+        fs::write(&source, "# Evidence\n\nPinky retains a newer statement.\n").unwrap();
+        let second = ingestor.ingest(approved.path(), &source).unwrap();
+        assert_eq!(second.source_id, first.source_id);
+        assert_ne!(second.version_id, first.version_id);
+        let database = ingestor.database.lock().unwrap();
+        let versions: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM source_versions WHERE source_id = ?1",
+                [first.source_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(versions, 2);
+    }
+
+    #[test]
+    fn rejects_a_symlink_escape_from_the_approved_root() {
+        let (_vault, approved, ingestor) = ingestor();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), approved.path().join("escape.txt")).unwrap();
+        assert!(matches!(
+            ingestor.ingest(approved.path(), approved.path().join("escape.txt")),
+            Err(IngestionError::OutsideApprovedRoot)
+        ));
+    }
+
+    #[test]
+    fn archives_unsupported_binary_sources_without_chunks() {
+        let (_vault, approved, ingestor) = ingestor();
+        let source = approved.path().join("sample.pdf");
+        fs::write(&source, b"%PDF-1.7\0fixture").unwrap();
+        let ingested = ingestor.ingest(approved.path(), &source).unwrap();
+        assert_eq!(ingested.state, "unsupported");
+        assert_eq!(ingested.chunk_count, 0);
+        assert_eq!(ingestor.list_sources().unwrap()[0].state, "unsupported");
+    }
+
+    #[test]
+    fn deduplicates_retained_bytes_across_distinct_sources() {
+        let (_vault, approved, ingestor) = ingestor();
+        fs::write(approved.path().join("first.txt"), "shared evidence").unwrap();
+        fs::write(approved.path().join("second.txt"), "shared evidence").unwrap();
+        ingestor
+            .ingest(approved.path(), approved.path().join("first.txt"))
+            .unwrap();
+        ingestor
+            .ingest(approved.path(), approved.path().join("second.txt"))
+            .unwrap();
+
+        let database = ingestor.database.lock().unwrap();
+        let (objects, references): (i64, i64) = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*), SUM(reference_count) FROM objects",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(objects, 1);
+        assert_eq!(references, 6);
+    }
+
+    #[test]
+    fn chunks_at_five_hundred_tokens_with_seventy_five_token_overlap() {
+        let text = (0..1_100)
+            .map(|index| format!("token{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let chunks = chunk_text(&text);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.token_count)
+                .collect::<Vec<_>>(),
+            [500, 500, 250]
+        );
+        let first_tokens = chunks[0].text.split_whitespace().collect::<Vec<_>>();
+        let second_tokens = chunks[1].text.split_whitespace().collect::<Vec<_>>();
+        assert_eq!(&first_tokens[425..], &second_tokens[..75]);
+    }
+
+    #[test]
+    fn cancellation_refuses_to_create_source_metadata() {
+        let (_vault, approved, ingestor) = ingestor();
+        let source = approved.path().join("cancelled.txt");
+        fs::write(&source, "this must not become a retained source").unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert!(matches!(
+            ingestor.ingest_cancellable(approved.path(), &source, cancellation),
+            Err(IngestionError::Cancelled)
+        ));
+        assert!(ingestor.list_sources().unwrap().is_empty());
+    }
+}

@@ -21,17 +21,22 @@ The executable stage-one foundation currently includes:
   `SIGKILL` after ten seconds, and prevents descendants from becoming orphans;
 - compressed task-event histories retained as referenced vault objects, with
   interrupted work durably changed to `failed_interrupted` after restart;
+- approved-root ingestion for UTF-8 text, Markdown, logs, source code, JSON,
+  YAML, XML, HTML, and CSV, with encrypted originals, versioned metadata,
+  overlapping chunks, deduplication, and symlink-escape protection;
 - a three-region UI, live xterm event log, task controls, and a Three.js entity
   driven by task state, including reduced motion and a non-WebGL fallback.
 
 Live core acceptance now covers real gocryptfs creation, Secret Service key
 storage, unmounting, restart-time unlocking, and encrypted object recovery on
 the target host. Native compilation, WebDriver end-to-end checks, Linux bundle
-inspection, and clean Debian package installation now pass. Ingestion,
-retrieval, models, research, generated-code containers, image generation,
-backup/restore, and the later release gates remain unimplemented. The UI
-intentionally refuses conversations and retained-data operations while the
-vault is unavailable.
+inspection, and clean Debian package installation now pass. The first local
+text-ingestion slice is usable from the Sources panel. Additional extractors,
+filesystem watching, retrieval, models, research, generated-code containers,
+image generation, backup/restore, and the later release gates remain
+unimplemented. Chat controls are visibly disabled until retrieval and the local
+model runtime exist; retained-data operations remain disabled while the vault
+is unavailable.
 
 ## Development
 
@@ -60,6 +65,10 @@ Run the desktop application with:
 cd apps/desktop
 npm run tauri dev
 ```
+
+After unlocking the vault, choose **Add source**, enter an approved directory,
+and enter the absolute path of a file inside it. Pinky archives the exact opened
+file in the encrypted vault and shows ingestion progress in the task panel.
 
 On Debian 13, install the native build and headless WebDriver prerequisites
 before running the Stage 1 desktop acceptance suite:

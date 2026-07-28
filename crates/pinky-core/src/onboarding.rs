@@ -281,16 +281,18 @@ pub fn unlock_registered_vault<P: VaultPlatform>(
             "cipher directory is unavailable".into(),
         ));
     }
-    if platform
+    let mount_already_attached = platform
         .verifier()
-        .is_gocryptfs_mount(&registration.paths.mount_dir)?
-    {
-        return Err(OnboardingError::InvalidRegistration(
-            "registered mount directory is already mounted by another process".into(),
-        ));
-    }
-    ensure_empty_or_missing(&registration.paths.mount_dir)?;
-    let mount_created = create_private_directory(&registration.paths.mount_dir)?;
+        .is_gocryptfs_mount(&registration.paths.mount_dir)?;
+    let mount_created = if mount_already_attached {
+        // The platform owns recovery of an existing mount. In particular, the
+        // system implementation detaches stale or orphaned gocryptfs mounts
+        // before launching a freshly authenticated process.
+        false
+    } else {
+        ensure_empty_or_missing(&registration.paths.mount_dir)?;
+        create_private_directory(&registration.paths.mount_dir)?
+    };
 
     let result = (|| {
         let root_key = platform.load_root_key(registration.vault_id)?;
@@ -461,6 +463,26 @@ impl VaultPlatform for SystemVaultPlatform {
         paths: &VaultPaths,
         password: &str,
     ) -> Result<Self::Mount, OnboardingError> {
+        let verifier = ProcMountVerifier;
+        if verifier.is_gocryptfs_mount(&paths.mount_dir)? {
+            if mount_is_responsive(&paths.mount_dir) {
+                return Err(OnboardingError::Platform {
+                    operation: "gocryptfs mount",
+                    message: "the vault is already open in another Pinky process".into(),
+                });
+            }
+            // A force-terminated desktop can leave a disconnected FUSE
+            // endpoint behind. Never accept it as proof that this launch
+            // mounted the registered cipher directory with the retrieved key.
+            unmount_path(&paths.mount_dir)?;
+            if verifier.is_gocryptfs_mount(&paths.mount_dir)? {
+                return Err(OnboardingError::Platform {
+                    operation: "stale vault cleanup",
+                    message: "the previous gocryptfs mount is still attached".into(),
+                });
+            }
+        }
+        fs::create_dir_all(&paths.mount_dir)?;
         let mut child = Command::new("gocryptfs")
             .args(["-fg", "-q", "-nosyslog", "-passfile", "/dev/stdin"])
             .arg(&paths.cipher_dir)
@@ -476,7 +498,6 @@ impl VaultPlatform for SystemVaultPlatform {
             .write_all(password.as_bytes())?;
 
         let started = Instant::now();
-        let verifier = ProcMountVerifier;
         while started.elapsed() < MOUNT_TIMEOUT {
             if verifier.is_gocryptfs_mount(&paths.mount_dir)? {
                 return Ok(GocryptfsMount {
@@ -503,6 +524,12 @@ impl VaultPlatform for SystemVaultPlatform {
     fn verifier(&self) -> Self::Verifier {
         ProcMountVerifier
     }
+}
+
+fn mount_is_responsive(path: &Path) -> bool {
+    fs::read_dir(path)
+        .and_then(|mut entries| entries.next().transpose())
+        .is_ok()
 }
 
 pub struct GocryptfsMount {
@@ -932,6 +959,41 @@ mod tests {
             .lock()
             .unwrap()
             .ends_with(&["prerequisites", "load", "mount"]));
+    }
+
+    #[test]
+    fn registration_delegates_existing_mount_recovery_to_the_platform() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = VaultPaths {
+            cipher_dir: root.path().join("cipher"),
+            mount_dir: root.path().join("mount"),
+        };
+        let registration_path = root.path().join("config/vault.json");
+        let platform = FakePlatform::default();
+        let first = create_registered_vault(
+            &platform,
+            paths,
+            "a durable recovery phrase",
+            &registration_path,
+        )
+        .unwrap();
+        drop(first);
+        platform.mounted.store(true, Ordering::SeqCst);
+
+        let registration = read_registration(&registration_path).unwrap();
+        let reopened = unlock_registered_vault(&platform, &registration).unwrap();
+        assert!(reopened.vault.ensure_mounted().is_ok());
+        assert!(platform
+            .calls
+            .lock()
+            .unwrap()
+            .ends_with(&["prerequisites", "load", "mount"]));
+    }
+
+    #[test]
+    fn ordinary_directory_is_responsive_for_mount_ownership_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(mount_is_responsive(directory.path()));
     }
 
     #[test]

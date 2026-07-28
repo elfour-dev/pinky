@@ -16,13 +16,17 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Recovery-passphrase wrapping, domain-separated keys, and transactional onboarding tests
 - [x] Live gocryptfs and Secret Service onboarding acceptance on the target host
 - [x] Registered-vault discovery and Secret Service unlock after restart
+- [x] Disconnected FUSE mount recovery and live-mount ownership protection
 - [x] Durable event-log objects and startup interruption recovery
 - [x] Supervised child-process SIGTERM/SIGKILL escalation
 - [x] Stage-one Tauri end-to-end and clean-machine tests
 
 ## Stages 2–6
 
-- [ ] Local extraction, watching, Tantivy, Qdrant, and citation viewer
+- [x] Approved-path local UTF-8 text ingestion, encrypted retention, versioning, and chunk metadata
+- [x] Cross-source object deduplication and symlink-escape rejection
+- [ ] PDF, office, image/OCR, and isolated-worker extractors
+- [ ] Filesystem watching, Tantivy, Qdrant, and citation viewer
 - [ ] Model onboarding, hybrid retrieval, cited chat, claims, and dossiers
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
 - [ ] Workspace snapshots, permissions, Podman tools, and app generation
@@ -45,6 +49,16 @@ metadata. The Debian package also passes a pinned Debian 13 clean-machine test:
 it installs with its declared dependencies, has no unresolved shared libraries,
 and remains running as an unprivileged user in a fresh Xvfb and D-Bus session.
 
+The first Stage 2 slice accepts an explicit approved directory and local file.
+It canonicalizes both paths, opens the source without following a swapped final
+symlink, verifies the opened descriptor still resolves inside the approved
+root, and refuses non-regular files. Original bytes are streamed into encrypted
+content-addressed storage before extraction. UTF-8 text, Markdown, logs, source
+code, JSON, YAML, XML, HTML, and CSV are normalized for line endings, retained,
+and chunked at 500 approximate tokens with 75-token overlap. Metadata changes
+atomically create a new source version and move the current-version pointer;
+unsupported binaries are still archived and visibly marked unsupported.
+
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and
 failure rollback. The opt-in target-host acceptance test also passed with real
@@ -52,6 +66,13 @@ gocryptfs and Secret Service: it created and mounted a temporary vault, retained
 and verified an encrypted object, unmounted, reopened the registered vault from
 its stored root key, verified the same object, and removed the temporary secret
 and vault.
+
+Registered-vault recovery distinguishes a responsive mount owned by another
+Pinky process from a disconnected FUSE endpoint left by forced termination.
+Responsive mounts are never displaced; stale endpoints are detached before a
+freshly authenticated gocryptfs process starts. The target host's existing
+registered vault was verified through this path from Secret Service lookup
+through SQLCipher open and clean unmount.
 
 Restart tests cover bounded, owner-only registration metadata, strict schema and
 recovery-identity validation, Secret Service key retrieval, remounting, and

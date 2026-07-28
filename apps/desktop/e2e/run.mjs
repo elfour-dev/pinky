@@ -93,6 +93,8 @@ try {
   assert.equal(await request("GET", `/session/${sessionId}/title`), "Pinky");
   assert.equal(await execute("return document.querySelectorAll('aside.left-panel, section.centre-panel, aside.right-panel').length"), 3);
   assert.match(await execute("return document.querySelector('.vault-card').textContent"), /Vault locked/);
+  assert.equal(await execute("return document.querySelector('button.send').disabled"), true);
+  assert.equal(await execute("return document.querySelector('button.new-chat').disabled"), true);
   console.log("PASS native three-region shell");
 
   await clickButton("Start setup");

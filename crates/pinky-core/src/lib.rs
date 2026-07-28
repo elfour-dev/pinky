@@ -5,6 +5,7 @@
 //! boundary.
 
 pub mod database;
+pub mod ingestion;
 pub mod object_store;
 pub mod onboarding;
 pub mod process;
@@ -14,6 +15,7 @@ pub mod task_journal;
 pub mod vault;
 
 pub use database::{Database, DatabaseError};
+pub use ingestion::{IngestedSource, IngestionError, LocalIngestor, SourceSummary};
 pub use object_store::{
     CompressionClass, ObjectMetadata, ObjectStore, ObjectStoreError, StoredObject,
 };

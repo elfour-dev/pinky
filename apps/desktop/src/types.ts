@@ -16,3 +16,14 @@ export interface RuntimeStatus {
 }
 export interface VaultPaths { cipher_dir: string; mount_dir: string; }
 export interface SetupVaultResponse { vault_id: string; recovery_path: string; }
+export interface SourceSummary {
+  source_id: string;
+  version_id: string;
+  display_name: string;
+  canonical_uri: string;
+  mime_type: string;
+  byte_size: number;
+  chunk_count: number;
+  state: string;
+  updated_at: string;
+}
