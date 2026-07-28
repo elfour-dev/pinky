@@ -231,7 +231,11 @@ mod tests {
 
     async fn wait_for_file(path: &Path) {
         timeout(Duration::from_secs(1), async {
-            while !path.exists() {
+            while fs::metadata(path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+                == 0
+            {
                 tokio::task::yield_now().await;
             }
         })

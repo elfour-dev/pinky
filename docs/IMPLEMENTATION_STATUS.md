@@ -5,7 +5,7 @@ This file is the acceptance ledger for the Pinky implementation specification.
 
 ## Stage 1 — foundation
 
-- [x] Rust core workspace (native shell compilation still requires host WebKit/GTK development packages)
+- [x] Rust core workspace and native Tauri shell compilation
 - [x] React production build and state-mapping unit test
 - [x] Verified gocryptfs mount capability boundary
 - [x] Content-addressed compressed object store
@@ -18,7 +18,7 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Registered-vault discovery and Secret Service unlock after restart
 - [x] Durable event-log objects and startup interruption recovery
 - [x] Supervised child-process SIGTERM/SIGKILL escalation
-- [ ] Stage-one Tauri end-to-end and clean-machine tests
+- [x] Stage-one Tauri end-to-end and clean-machine tests
 
 ## Stages 2–6
 
@@ -32,20 +32,18 @@ This file is the acceptance ledger for the Pinky implementation specification.
 
 Frontend unit tests and production compilation pass with Node.js. The core Rust
 tests pass using a temporary stable toolchain and vendored SQLCipher/OpenSSL.
-Full Tauri-native compilation reached the native dependency build and stopped
-because this host lacks `pkg-config` and the D-Bus development package; the
-later WebKit/GTK development packages may also be required. Installing host
-packages was outside this implementation run, so native end-to-end testing
-remains an unchecked stage-one gate.
+Full Tauri-native compilation passes on the target host. The dependency-free
+WebDriver protocol harness uses an isolated XDG profile and verifies the
+compiled WebKit application shell, a real Tauri path command, task events, and
+cancellation. This acceptance run exposed and fixed a synchronous Tauri command
+trying to spawn work without a Tokio runtime.
 
-A dependency-free WebDriver protocol harness and a clean-machine Linux workflow
-now define that remaining gate. The harness uses an isolated XDG profile and
-checks the compiled WebKit application shell, a real Tauri path command, task
-events, and cancellation. Bundle inspection validates the Debian architecture
-and installed files, extracts the AppImage without FUSE, verifies its runtime
-layout, and prints SHA-256 artifact metadata. These checks are implemented but
-not marked accepted here because installing the remaining native packages
-requires an interactive sudo password unavailable to this session.
+Release Debian and AppImage bundles build successfully. Bundle inspection
+validates the Debian architecture and installed files, extracts the AppImage
+without FUSE, verifies its runtime layout, and reports SHA-256 artifact
+metadata. The Debian package also passes a pinned Debian 13 clean-machine test:
+it installs with its declared dependencies, has no unresolved shared libraries,
+and remains running as an unprivileged user in a fresh Xvfb and D-Bus session.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and

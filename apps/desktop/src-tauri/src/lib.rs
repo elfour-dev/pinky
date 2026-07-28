@@ -300,8 +300,8 @@ async fn unlock_runtime(runtime: AppRuntime, tasks: TaskManager) -> Result<(), S
 }
 
 #[tauri::command]
-fn start_system_check(tasks: State<'_, TaskManager>) -> String {
-    tasks
+async fn start_system_check(tasks: State<'_, TaskManager>) -> Result<String, String> {
+    Ok(tasks
         .spawn("system check", None, |mut context| async move {
             let checks = [
                 "gocryptfs",
@@ -324,7 +324,7 @@ fn start_system_check(tasks: State<'_, TaskManager>) -> String {
             }
             Ok(())
         })
-        .to_string()
+        .to_string())
 }
 
 #[tauri::command]

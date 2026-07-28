@@ -46,3 +46,6 @@ jobs:
 
       - name: Inspect clean-machine bundles
         run: npm run verify:bundle --prefix apps/desktop
+
+      - name: Install and launch Debian package in a clean Debian 13 container
+        run: npm run test:clean-install --prefix apps/desktop

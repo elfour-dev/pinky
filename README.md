@@ -26,11 +26,12 @@ The executable stage-one foundation currently includes:
 
 Live core acceptance now covers real gocryptfs creation, Secret Service key
 storage, unmounting, restart-time unlocking, and encrypted object recovery on
-the target host. Native Tauri compilation still requires the missing Linux
-development packages. Ingestion, retrieval, models, research, generated-code
-containers, image generation, backup/restore, and release packaging remain
-gated work. The UI intentionally refuses conversations and retained-data
-operations while the vault is unavailable.
+the target host. Native compilation, WebDriver end-to-end checks, Linux bundle
+inspection, and clean Debian package installation now pass. Ingestion,
+retrieval, models, research, generated-code containers, image generation,
+backup/restore, and the later release gates remain unimplemented. The UI
+intentionally refuses conversations and retained-data operations while the
+vault is unavailable.
 
 ## Development
 
@@ -82,7 +83,9 @@ npm run verify:bundle
 ```
 
 The clean-machine version of these checks is defined in
-`.github/workflows/stage-one.yml`.
+`.github/workflows/stage-one.yml`. After building the bundles, it can also be
+run locally with `npm run test:clean-install`; this installs the `.deb` and
+launches Pinky as an unprivileged user in a pinned Debian 13 container.
 
 Production onboarding will additionally require gocryptfs, Linux Secret Service,
 rootless Podman, and Vulkan. Pinky will never treat a normal directory as an
