@@ -19,9 +19,12 @@ use crate::{
 };
 
 const RECOVERY_FILE: &str = ".pinky-recovery.json";
+const REGISTRATION_VERSION: u16 = 1;
+const MAX_REGISTRATION_BYTES: u64 = 64 * 1024;
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct VaultPaths {
     pub cipher_dir: PathBuf,
     pub mount_dir: PathBuf,
@@ -35,6 +38,8 @@ pub enum OnboardingError {
     DestinationNotEmpty(PathBuf),
     #[error("required program is unavailable: {0}")]
     MissingPrerequisite(&'static str),
+    #[error("vault registration is invalid: {0}")]
+    InvalidRegistration(String),
     #[error("{operation} failed: {message}")]
     Platform {
         operation: &'static str,
@@ -61,6 +66,7 @@ pub trait VaultPlatform {
         password: &str,
     ) -> Result<(), OnboardingError>;
     fn store_root_key(&self, vault_id: Uuid, root_key: &[u8; 32]) -> Result<(), OnboardingError>;
+    fn load_root_key(&self, vault_id: Uuid) -> Result<VaultKey, OnboardingError>;
     fn clear_root_key(&self, vault_id: Uuid);
     fn mount_gocryptfs(
         &self,
@@ -76,6 +82,44 @@ pub struct OnboardedVault<M> {
     pub database: Database,
     pub recovery_path: PathBuf,
     pub mount: M,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VaultRegistration {
+    pub version: u16,
+    pub vault_id: Uuid,
+    pub paths: VaultPaths,
+    pub recovery_path: PathBuf,
+}
+
+impl<M> OnboardedVault<M> {
+    pub fn registration(&self, paths: VaultPaths) -> VaultRegistration {
+        VaultRegistration {
+            version: REGISTRATION_VERSION,
+            vault_id: self.id,
+            paths,
+            recovery_path: self.recovery_path.clone(),
+        }
+    }
+}
+
+impl VaultRegistration {
+    pub fn validate(&self) -> Result<(), OnboardingError> {
+        if self.version != REGISTRATION_VERSION {
+            return Err(OnboardingError::InvalidRegistration(format!(
+                "unsupported version {}",
+                self.version
+            )));
+        }
+        self.paths.validate()?;
+        if self.recovery_path != self.paths.cipher_dir.join(RECOVERY_FILE) {
+            return Err(OnboardingError::InvalidRegistration(
+                "recovery path does not belong to the registered vault".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl VaultPaths {
@@ -102,6 +146,30 @@ pub fn create_vault<P: VaultPlatform>(
     paths: VaultPaths,
     recovery_passphrase: &str,
 ) -> Result<OnboardedVault<P::Mount>, OnboardingError> {
+    create_vault_inner(platform, paths, recovery_passphrase, None)
+}
+
+pub fn create_registered_vault<P: VaultPlatform>(
+    platform: &P,
+    paths: VaultPaths,
+    recovery_passphrase: &str,
+    registration_path: &Path,
+) -> Result<OnboardedVault<P::Mount>, OnboardingError> {
+    validate_path(registration_path)?;
+    create_vault_inner(
+        platform,
+        paths,
+        recovery_passphrase,
+        Some(registration_path),
+    )
+}
+
+fn create_vault_inner<P: VaultPlatform>(
+    platform: &P,
+    paths: VaultPaths,
+    recovery_passphrase: &str,
+    registration_path: Option<&Path>,
+) -> Result<OnboardedVault<P::Mount>, OnboardingError> {
     paths.validate()?;
     platform.check_prerequisites()?;
     ensure_empty_or_missing(&paths.cipher_dir)?;
@@ -127,6 +195,16 @@ pub fn create_vault<P: VaultPlatform>(
     let mount = platform.mount_gocryptfs(&paths, &gocryptfs_password)?;
     let vault = Vault::open_with(&paths.mount_dir, platform.verifier())?;
     let database = Database::open(&vault, database_key)?;
+    if let Some(registration_path) = registration_path {
+        let registration = VaultRegistration {
+            version: REGISTRATION_VERSION,
+            vault_id,
+            paths: paths.clone(),
+            recovery_path: recovery_path.clone(),
+        };
+        write_registration(registration_path, &registration)?;
+        rollback.registration_path = Some(registration_path.to_owned());
+    }
     rollback.complete = true;
 
     Ok(OnboardedVault {
@@ -138,6 +216,126 @@ pub fn create_vault<P: VaultPlatform>(
     })
 }
 
+pub fn write_registration(
+    path: &Path,
+    registration: &VaultRegistration,
+) -> Result<(), OnboardingError> {
+    validate_path(path)?;
+    registration.validate()?;
+    if path.exists() {
+        return Err(OnboardingError::InvalidRegistration(
+            "registration already exists".into(),
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if canonical_destination(path)? != path {
+        return Err(OnboardingError::InvalidPaths);
+    }
+    if let Some(parent) = path.parent() {
+        set_owner_only(parent, true)?;
+    }
+    let result = atomic_write_json(path, registration);
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result
+}
+
+pub fn read_registration(path: &Path) -> Result<VaultRegistration, OnboardingError> {
+    validate_path(path)?;
+    if canonical_destination(path)? != path {
+        return Err(OnboardingError::InvalidPaths);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_REGISTRATION_BYTES
+    {
+        return Err(OnboardingError::InvalidRegistration(
+            "registration is not a bounded regular file".into(),
+        ));
+    }
+    let bytes = fs::read(path)?;
+    let registration: VaultRegistration = serde_json::from_slice(&bytes).map_err(|error| {
+        OnboardingError::InvalidRegistration(format!("malformed JSON: {error}"))
+    })?;
+    registration.validate()?;
+    validate_recovery_identity(&registration)?;
+    Ok(registration)
+}
+
+pub fn unlock_registered_vault<P: VaultPlatform>(
+    platform: &P,
+    registration: &VaultRegistration,
+) -> Result<OnboardedVault<P::Mount>, OnboardingError> {
+    registration.validate()?;
+    validate_recovery_identity(registration)?;
+    platform.check_prerequisites()?;
+
+    let cipher_metadata = fs::symlink_metadata(&registration.paths.cipher_dir)?;
+    if cipher_metadata.file_type().is_symlink() || !cipher_metadata.is_dir() {
+        return Err(OnboardingError::InvalidRegistration(
+            "cipher directory is unavailable".into(),
+        ));
+    }
+    if platform
+        .verifier()
+        .is_gocryptfs_mount(&registration.paths.mount_dir)?
+    {
+        return Err(OnboardingError::InvalidRegistration(
+            "registered mount directory is already mounted by another process".into(),
+        ));
+    }
+    ensure_empty_or_missing(&registration.paths.mount_dir)?;
+    let mount_created = create_private_directory(&registration.paths.mount_dir)?;
+
+    let result = (|| {
+        let root_key = platform.load_root_key(registration.vault_id)?;
+        let subkeys = root_key.derive_subkeys()?;
+        let password = subkeys.gocryptfs_password();
+        let database_key = subkeys.database_key();
+        let mount = platform.mount_gocryptfs(&registration.paths, &password)?;
+        let vault = Vault::open_with(&registration.paths.mount_dir, platform.verifier())?;
+        let database = Database::open(&vault, database_key)?;
+        Ok(OnboardedVault {
+            id: registration.vault_id,
+            vault,
+            database,
+            recovery_path: registration.recovery_path.clone(),
+            mount,
+        })
+    })();
+
+    if result.is_err() && mount_created {
+        let _ = fs::remove_dir(&registration.paths.mount_dir);
+    }
+    result
+}
+
+fn validate_recovery_identity(registration: &VaultRegistration) -> Result<(), OnboardingError> {
+    let metadata = fs::symlink_metadata(&registration.recovery_path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_REGISTRATION_BYTES
+    {
+        return Err(OnboardingError::InvalidRegistration(
+            "recovery envelope is not a bounded regular file".into(),
+        ));
+    }
+    let recovery: RecoveryEnvelope =
+        serde_json::from_slice(&fs::read(&registration.recovery_path)?).map_err(|error| {
+            OnboardingError::InvalidRegistration(format!("recovery envelope is malformed: {error}"))
+        })?;
+    if recovery.vault_id != registration.vault_id {
+        return Err(OnboardingError::InvalidRegistration(
+            "vault and recovery identifiers do not match".into(),
+        ));
+    }
+    Ok(())
+}
+
 struct SetupRollback<'a, P: VaultPlatform> {
     platform: &'a P,
     vault_id: Uuid,
@@ -145,6 +343,7 @@ struct SetupRollback<'a, P: VaultPlatform> {
     secret_stored: bool,
     cipher_created: bool,
     mount_created: bool,
+    registration_path: Option<PathBuf>,
     complete: bool,
 }
 
@@ -157,6 +356,7 @@ impl<'a, P: VaultPlatform> SetupRollback<'a, P> {
             secret_stored: false,
             cipher_created: false,
             mount_created: false,
+            registration_path: None,
             complete: false,
         }
     }
@@ -169,6 +369,9 @@ impl<P: VaultPlatform> Drop for SetupRollback<'_, P> {
         }
         if self.secret_stored {
             self.platform.clear_root_key(self.vault_id);
+        }
+        if let Some(path) = &self.registration_path {
+            let _ = fs::remove_file(path);
         }
         if self.mount_created {
             let _ = fs::remove_dir(&self.paths.mount_dir);
@@ -231,6 +434,10 @@ impl VaultPlatform for SystemVaultPlatform {
                 child.wait_with_output()
             })?;
         status_to_result(status, "Secret Service storage")
+    }
+
+    fn load_root_key(&self, vault_id: Uuid) -> Result<VaultKey, OnboardingError> {
+        load_root_key_from_secret_service(vault_id)
     }
 
     fn clear_root_key(&self, vault_id: Uuid) {
@@ -451,11 +658,7 @@ fn create_private_directory(path: &Path) -> Result<bool, OnboardingError> {
         }
         return Err(OnboardingError::InvalidPaths);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
+    set_owner_only(path, true)?;
     Ok(created)
 }
 
@@ -463,14 +666,33 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), Onboardi
     let temporary = path.with_extension("json.partial");
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    fs::rename(&temporary, path)?;
-    File::open(path.parent().ok_or(OnboardingError::InvalidPaths)?)?.sync_all()?;
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        set_owner_only(&temporary, false)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        File::open(path.parent().ok_or(OnboardingError::InvalidPaths)?)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn set_owner_only(path: &Path, directory: bool) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if directory { 0o700 } else { 0o600 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_owner_only(_path: &Path, _directory: bool) -> Result<(), std::io::Error> {
     Ok(())
 }
 
@@ -532,13 +754,23 @@ pub fn load_root_key_from_secret_service(vault_id: Uuid) -> Result<VaultKey, Onb
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
 
     #[derive(Clone)]
-    struct FakeVerifier;
+    struct FakeVerifier(Arc<AtomicBool>);
     impl MountVerifier for FakeVerifier {
         fn is_gocryptfs_mount(&self, _: &Path) -> Result<bool, std::io::Error> {
-            Ok(true)
+            Ok(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    struct FakeMount(Arc<AtomicBool>);
+    impl Drop for FakeMount {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
         }
     }
 
@@ -546,10 +778,12 @@ mod tests {
     struct FakePlatform {
         calls: Arc<Mutex<Vec<&'static str>>>,
         fail_store: bool,
+        mounted: Arc<AtomicBool>,
+        root_key: Arc<Mutex<Option<[u8; 32]>>>,
     }
 
     impl VaultPlatform for FakePlatform {
-        type Mount = ();
+        type Mount = FakeMount;
         type Verifier = FakeVerifier;
 
         fn check_prerequisites(&self) -> Result<(), OnboardingError> {
@@ -562,7 +796,7 @@ mod tests {
             Ok(())
         }
 
-        fn store_root_key(&self, _: Uuid, _: &[u8; 32]) -> Result<(), OnboardingError> {
+        fn store_root_key(&self, _: Uuid, root_key: &[u8; 32]) -> Result<(), OnboardingError> {
             self.calls.lock().unwrap().push("store");
             if self.fail_store {
                 Err(OnboardingError::Platform {
@@ -570,21 +804,36 @@ mod tests {
                     message: "injected failure".into(),
                 })
             } else {
+                *self.root_key.lock().unwrap() = Some(*root_key);
                 Ok(())
             }
         }
 
+        fn load_root_key(&self, _: Uuid) -> Result<VaultKey, OnboardingError> {
+            self.calls.lock().unwrap().push("load");
+            self.root_key
+                .lock()
+                .unwrap()
+                .map(VaultKey::from_bytes)
+                .ok_or_else(|| OnboardingError::Platform {
+                    operation: "test load",
+                    message: "missing key".into(),
+                })
+        }
+
         fn clear_root_key(&self, _: Uuid) {
             self.calls.lock().unwrap().push("clear");
+            *self.root_key.lock().unwrap() = None;
         }
 
         fn mount_gocryptfs(&self, _: &VaultPaths, _: &str) -> Result<Self::Mount, OnboardingError> {
             self.calls.lock().unwrap().push("mount");
-            Ok(())
+            self.mounted.store(true, Ordering::SeqCst);
+            Ok(FakeMount(self.mounted.clone()))
         }
 
         fn verifier(&self) -> Self::Verifier {
-            FakeVerifier
+            FakeVerifier(self.mounted.clone())
         }
     }
 
@@ -651,5 +900,92 @@ mod tests {
             mount_dir: root.path().join("mount"),
         };
         assert!(paths.validate().is_err());
+    }
+
+    #[test]
+    fn registration_unlocks_the_same_vault_after_a_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = VaultPaths {
+            cipher_dir: root.path().join("cipher"),
+            mount_dir: root.path().join("mount"),
+        };
+        let registration_path = root.path().join("config/vault.json");
+        let platform = FakePlatform::default();
+        let first = create_registered_vault(
+            &platform,
+            paths.clone(),
+            "a durable recovery phrase",
+            &registration_path,
+        )
+        .unwrap();
+        let first_id = first.id;
+        drop(first);
+        fs::remove_dir_all(&paths.mount_dir).unwrap();
+
+        let registration = read_registration(&registration_path).unwrap();
+        let reopened = unlock_registered_vault(&platform, &registration).unwrap();
+        assert_eq!(reopened.id, first_id);
+        assert!(reopened.vault.ensure_mounted().is_ok());
+        assert!(platform
+            .calls
+            .lock()
+            .unwrap()
+            .ends_with(&["prerequisites", "load", "mount"]));
+    }
+
+    #[test]
+    fn registration_rejects_a_mismatched_recovery_envelope() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = VaultPaths {
+            cipher_dir: root.path().join("cipher"),
+            mount_dir: root.path().join("mount"),
+        };
+        let registration_path = root.path().join("vault.json");
+        let platform = FakePlatform::default();
+        let onboarded = create_registered_vault(
+            &platform,
+            paths,
+            "a durable recovery phrase",
+            &registration_path,
+        )
+        .unwrap();
+        let recovery_path = onboarded.recovery_path.clone();
+        drop(onboarded);
+        let mut recovery: RecoveryEnvelope =
+            serde_json::from_slice(&fs::read(&recovery_path).unwrap()).unwrap();
+        recovery.vault_id = Uuid::new_v4();
+        fs::write(&recovery_path, serde_json::to_vec(&recovery).unwrap()).unwrap();
+        assert!(matches!(
+            read_registration(&registration_path),
+            Err(OnboardingError::InvalidRegistration(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registration_is_owner_readable_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let paths = VaultPaths {
+            cipher_dir: root.path().join("cipher"),
+            mount_dir: root.path().join("mount"),
+        };
+        let registration_path = root.path().join("config/vault.json");
+        let platform = FakePlatform::default();
+        let _onboarded = create_registered_vault(
+            &platform,
+            paths,
+            "a durable recovery phrase",
+            &registration_path,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(registration_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 }

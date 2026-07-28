@@ -5,9 +5,10 @@ import { BookOpen, Box, ChevronRight, CirclePause, Database, FolderKey, KeyRound
 import { Terminal } from "@xterm/xterm";
 import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
+import { mergeTaskEvents } from "./events";
 import type { RuntimeStatus, SetupVaultResponse, TaskEvent, VaultPaths } from "./types";
 
-const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_id: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
+const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
 
 function ActivityTerminal({ events }: { events: TaskEvent[] }) {
@@ -46,14 +47,20 @@ export function App() {
 
   useEffect(() => {
     if (IS_TAURI) void invoke<RuntimeStatus>("runtime_status").then(setStatus).catch(() => setStatus(EMPTY_STATUS));
+    if (IS_TAURI) void invoke<TaskEvent[]>("task_snapshot").then((snapshot) => setEvents((current) => mergeTaskEvents(current, snapshot))).catch(() => undefined);
     const unlisten = IS_TAURI
-      ? listen<TaskEvent>("pinky://task-event", ({ payload }) => setEvents((current) => [...current, payload].slice(-500))).catch(() => () => undefined)
+      ? listen<TaskEvent>("pinky://task-event", ({ payload }) => setEvents((current) => mergeTaskEvents(current, [payload]))).catch(() => () => undefined)
       : Promise.resolve(() => undefined);
     const media = matchMedia("(prefers-reduced-motion: reduce)");
     const onMotion = () => setReducedMotion(media.matches);
     media.addEventListener("change", onMotion);
     return () => { void unlisten.then((stop) => stop()); media.removeEventListener("change", onMotion); };
   }, []);
+  useEffect(() => {
+    if (!IS_TAURI || !status.setup_in_progress) return;
+    const timer = window.setInterval(() => void invoke<RuntimeStatus>("runtime_status").then(setStatus).catch(() => undefined), 250);
+    return () => window.clearInterval(timer);
+  }, [status.setup_in_progress]);
 
   const startCheck = async () => {
     if (!IS_TAURI) { browserDemo(setEvents); return; }
@@ -104,6 +111,13 @@ export function App() {
       setSetupError(String(error));
     } finally { setSetupRunning(false); }
   };
+  const retryUnlock = async () => {
+    if (!IS_TAURI) return;
+    setStatus((current) => ({ ...current, setup_in_progress: true, unlock_error: null }));
+    await invoke("unlock_vault").catch(() => undefined);
+    const refreshed = await invoke<RuntimeStatus>("runtime_status").catch(() => null);
+    if (refreshed) setStatus(refreshed);
+  };
 
   return <main className="app-shell">
     <a className="skip-link" href="#conversation">Skip to conversation</a>
@@ -116,7 +130,7 @@ export function App() {
         <NavGroup icon={<BookOpen />} label="Dossiers" count="0" />
         <NavGroup icon={<FolderKey />} label="Workspaces" count="0"><button className="nav-row"><Plus size={13} /> Approve directory</button></NavGroup>
       </nav>
-      <div className={`vault-card ${status.vault_mounted ? "ready" : "locked"}`}><ShieldCheck size={17} /><div><strong>{status.vault_mounted ? "Vault unlocked" : "Vault locked"}</strong><small>{status.vault_mounted ? "Encrypted storage available" : "Setup required before data can be retained"}</small></div></div>
+      <div className={`vault-card ${status.vault_mounted ? "ready" : "locked"}`}><ShieldCheck size={17} /><div><strong>{status.vault_mounted ? "Vault unlocked" : status.vault_registered ? "Vault registered" : "Vault locked"}</strong><small>{status.vault_mounted ? "Encrypted storage available" : status.vault_registered ? "Waiting for encrypted storage to unlock" : "Setup required before data can be retained"}</small></div></div>
     </aside>
 
     <section className="centre-panel" id="conversation" aria-label="Conversation">
@@ -124,7 +138,7 @@ export function App() {
       <div className="conversation">
         <div className="entity-stage"><AsciiEntity state={entityState} reducedMotion={reducedMotion} /><span className={`state-pill ${entityState}`} aria-live="polite"><i /> {entityState}</span></div>
         <div className="welcome"><p className="eyebrow">ENCRYPTED · LOCAL · SOURCE-GROUNDED</p><h1>What should we understand<br />or create?</h1><p>Pinky retains approved evidence inside your encrypted vault and shows every operation while it works.</p></div>
-        {!status.vault_mounted && <div className="blocking-question" role="alert"><FolderKey size={19} /><div><strong>Set up the encrypted vault to begin</strong><p>Ingestion, conversations, generation, and logs stay disabled until gocryptfs and Secret Service are ready.</p></div><button onClick={openSetup}>Start setup</button></div>}
+        {!status.vault_mounted && (status.vault_registered ? <div className="blocking-question" role="alert"><KeyRound size={19} /><div><strong>{status.setup_in_progress ? "Unlocking your encrypted vault" : "Your registered vault is locked"}</strong><p>{status.unlock_error || "Pinky is retrieving its protected key from Linux Secret Service."}</p></div><button disabled={status.setup_in_progress || !status.prerequisites.gocryptfs || !status.prerequisites.secret_service} onClick={retryUnlock}>{status.setup_in_progress ? "Unlocking…" : "Retry unlock"}</button></div> : <div className="blocking-question" role="alert"><FolderKey size={19} /><div><strong>Set up the encrypted vault to begin</strong><p>Ingestion, conversations, generation, and logs stay disabled until gocryptfs and Secret Service are ready.</p></div><button onClick={openSetup}>Start setup</button></div>)}
       </div>
       <form className="composer" onSubmit={submit}>
         <textarea aria-label="Message Pinky" value={message} onChange={(event) => setMessage(event.target.value)} onFocus={() => setListening(true)} onBlur={() => setListening(false)} placeholder={status.vault_mounted ? "Ask from your sources or describe what to create…" : "Unlock the encrypted vault to start…"} disabled={!status.vault_mounted} />

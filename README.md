@@ -20,13 +20,12 @@ The executable stage-one foundation currently includes:
 - a three-region UI, live xterm event log, task controls, and a Three.js entity
   driven by task state, including reduced motion and a non-WebGL fallback.
 
-The vault-creation portion of onboarding is ready for native acceptance on a
+Vault creation and restart-time unlocking are ready for native acceptance on a
 host with the required Linux packages, but this checkout's host does not
-currently provide them. Registered-vault discovery and unlock after an app
-restart is the next onboarding slice. Ingestion, retrieval, models, research,
-generated-code containers, image generation, backup/restore, and release
-packaging remain gated work. The UI intentionally refuses conversations and
-retained-data operations while the vault is unavailable.
+currently provide them. Ingestion, retrieval, models, research, generated-code
+containers, image generation, backup/restore, and release packaging remain
+gated work. The UI intentionally refuses conversations and retained-data
+operations while the vault is unavailable.
 
 ## Development
 
@@ -57,6 +56,10 @@ Vault creation generates a random root key, derives independent gocryptfs and
 SQLCipher keys, stores the root key through Secret Service, and writes an
 Argon2id/XChaCha20-Poly1305 recovery envelope. The recovery passphrase is never
 stored. Both selected directories must be absolute, canonical, and empty.
+Pinky stores a separate owner-only registration containing only the vault UUID
+and canonical paths. On later launches it validates that registration against
+the recovery envelope, retrieves the root key from Secret Service, and remounts
+the vault without retaining the recovery passphrase.
 
 ## Security invariants
 

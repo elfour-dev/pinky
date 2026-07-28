@@ -14,8 +14,9 @@ pub mod vault;
 pub use database::{Database, DatabaseError};
 pub use object_store::{CompressionClass, ObjectMetadata, ObjectStore, StoredObject};
 pub use onboarding::{
-    create_vault, GocryptfsMount, OnboardedVault, OnboardingError, SystemVaultPlatform, VaultPaths,
-    VaultPlatform,
+    create_registered_vault, create_vault, read_registration, unlock_registered_vault,
+    write_registration, GocryptfsMount, OnboardedVault, OnboardingError, SystemVaultPlatform,
+    VaultPaths, VaultPlatform, VaultRegistration,
 };
 pub use recovery::{RecoveryEnvelope, RecoveryError, VaultKey, VaultSubkeys};
 pub use task::{TaskEvent, TaskManager, TaskPhase, TaskState};

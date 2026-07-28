@@ -15,7 +15,7 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Three-region task UI and task-state entity
 - [x] Recovery-passphrase wrapping, domain-separated keys, and transactional onboarding tests
 - [ ] Live gocryptfs and Secret Service onboarding acceptance on the target host
-- [ ] Registered-vault discovery and Secret Service unlock after restart
+- [x] Registered-vault discovery and Secret Service unlock after restart
 - [ ] Durable event-log objects and startup interruption recovery
 - [ ] Supervised child-process SIGTERM/SIGKILL escalation
 - [ ] Stage-one Tauri end-to-end and clean-machine tests
@@ -42,6 +42,11 @@ The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and
 failure rollback. Live acceptance remains blocked because this host also lacks
 `gocryptfs` and `secret-tool`.
+
+Restart tests cover bounded, owner-only registration metadata, strict schema and
+recovery-identity validation, Secret Service key retrieval, remounting, and
+SQLCipher reopening. Corrupt registration is reported and is never overwritten
+by a new setup.
 
 ## Architecture boundaries
 

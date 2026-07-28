@@ -8,7 +8,9 @@ export interface TaskEvent {
 export interface RuntimeStatus {
   vault_mounted: boolean;
   setup_in_progress: boolean;
+  vault_registered: boolean;
   vault_id: string | null;
+  unlock_error: string | null;
   prerequisites: Record<string, boolean>;
 }
 export interface VaultPaths { cipher_dir: string; mount_dir: string; }

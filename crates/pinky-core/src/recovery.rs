@@ -87,6 +87,7 @@ impl VaultSubkeys {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryEnvelope {
     pub version: u16,
     pub vault_id: Uuid,
@@ -95,6 +96,7 @@ pub struct RecoveryEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryKdf {
     pub algorithm: String,
     pub memory_kib: u32,
@@ -104,6 +106,7 @@ pub struct RecoveryKdf {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryCipher {
     pub algorithm: String,
     pub nonce_base64: String,
