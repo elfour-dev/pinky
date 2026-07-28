@@ -8,7 +8,7 @@ import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
 import type { RuntimeStatus, SetupVaultResponse, TaskEvent, VaultPaths } from "./types";
 
-const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
+const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
 
 function ActivityTerminal({ events }: { events: TaskEvent[] }) {
@@ -157,7 +157,7 @@ export function App() {
           {task.cancellable && <div className="task-actions"><button onClick={() => pause(task.task_id, task.phase.activity !== "Paused")}><CirclePause size={13} /> {task.phase.activity === "Paused" ? "Resume" : "Pause"}</button><button onClick={() => stop(task.task_id)}><Square size={12} /> Stop</button></div>}
         </article>)}
       </div>
-      <section className="runtime"><p className="eyebrow">RUNTIME</p>{Object.entries(status.prerequisites).map(([name, available]) => <div key={name}><span>{name.replace("_", " ")}</span><b className={available ? "ok" : "missing"}>{available ? "ready" : "missing"}</b></div>)}</section>
+      <section className="runtime"><p className="eyebrow">RUNTIME</p>{Object.entries(status.prerequisites).map(([name, available]) => <div key={name}><span>{name.replace("_", " ")}</span><b className={available ? "ok" : "missing"}>{available ? "ready" : "missing"}</b></div>)}<div><span>task journal</span><b className={status.task_journal_error ? "missing" : "ok"} title={status.task_journal_error || undefined}>{status.task_journal_error ? "error" : status.vault_mounted ? "durable" : "locked"}</b></div></section>
       <section className="log-panel"><div className="log-title"><span>Live event log</span><span>schema 1.0</span></div><ActivityTerminal events={events} /></section>
     </aside>
     {setupOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeSetup(); }}>

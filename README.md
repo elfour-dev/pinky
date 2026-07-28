@@ -17,6 +17,8 @@ The executable stage-one foundation currently includes:
   passphrase-protected recovery envelope and domain-separated storage keys;
 - monotonic task events, task trees, pause checkpoints, cooperative cancellation,
   and a ten-second hard abort deadline for in-process workers;
+- compressed task-event histories retained as referenced vault objects, with
+  interrupted work durably changed to `failed_interrupted` after restart;
 - a three-region UI, live xterm event log, task controls, and a Three.js entity
   driven by task state, including reduced motion and a non-WebGL fallback.
 
@@ -59,7 +61,9 @@ stored. Both selected directories must be absolute, canonical, and empty.
 Pinky stores a separate owner-only registration containing only the vault UUID
 and canonical paths. On later launches it validates that registration against
 the recovery envelope, retrieves the root key from Secret Service, and remounts
-the vault without retaining the recovery passphrase.
+the vault without retaining the recovery passphrase. Once the encrypted
+database is open, the task manager attaches its vault journal, continues the
+persisted monotonic sequence, and exposes any journal failure in runtime status.
 
 ## Security invariants
 

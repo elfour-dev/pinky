@@ -8,7 +8,8 @@ use std::{
 
 use pinky_core::{
     create_registered_vault, read_registration, unlock_registered_vault, GocryptfsMount,
-    OnboardedVault, SystemVaultPlatform, TaskManager, VaultPaths, VaultRegistration,
+    ObjectStore, OnboardedVault, SystemVaultPlatform, TaskJournal, TaskManager, VaultPaths,
+    VaultRegistration,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -22,6 +23,7 @@ struct RuntimeStatus {
     vault_registered: bool,
     vault_id: Option<Uuid>,
     unlock_error: Option<String>,
+    task_journal_error: Option<String>,
     prerequisites: BTreeMap<&'static str, bool>,
 }
 
@@ -71,7 +73,7 @@ struct SetupVaultResponse {
 }
 
 #[tauri::command]
-fn runtime_status(runtime: State<'_, AppRuntime>) -> RuntimeStatus {
+fn runtime_status(runtime: State<'_, AppRuntime>, tasks: State<'_, TaskManager>) -> RuntimeStatus {
     let data = runtime.data.lock().unwrap();
     let mounted = data
         .vault
@@ -87,6 +89,7 @@ fn runtime_status(runtime: State<'_, AppRuntime>) -> RuntimeStatus {
                 .map(|registration| registration.vault_id)
         }),
         unlock_error: data.unlock_error.clone(),
+        task_journal_error: tasks.journal_error(),
         prerequisites: BTreeMap::from([
             ("gocryptfs", command_exists("gocryptfs")),
             ("podman", command_exists("podman")),
@@ -141,6 +144,7 @@ async fn setup_vault(
     let registration_path = runtime.registration_path.as_ref().clone();
     let recovery_passphrase = Zeroizing::new(request.recovery_passphrase);
     let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+    let task_manager = tasks.inner().clone();
     tasks
         .inner()
         .clone()
@@ -151,17 +155,22 @@ async fn setup_vault(
                 "Deriving recovery key and creating encrypted vault",
             );
             let outcome = tauri::async_runtime::spawn_blocking(move || {
-                create_registered_vault(
+                let vault = create_registered_vault(
                     &SystemVaultPlatform,
                     paths,
                     &recovery_passphrase,
                     &registration_path,
                 )
-                .map(|vault| {
-                    let registration = vault.registration(registration_paths);
-                    (vault, registration)
-                })
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+                let journal = TaskJournal::new(
+                    vault.database.clone(),
+                    ObjectStore::new(vault.vault.clone()),
+                );
+                task_manager
+                    .attach_journal(journal)
+                    .map_err(|error| error.to_string())?;
+                let registration = vault.registration(registration_paths);
+                Ok((vault, registration))
             })
             .await
             .map_err(|error| format!("vault setup worker failed: {error}"))
@@ -235,6 +244,7 @@ async fn unlock_runtime(runtime: AppRuntime, tasks: TaskManager) -> Result<(), S
     };
 
     let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+    let task_manager = tasks.clone();
     tasks.spawn_uncancellable("vault unlock", None, move |context| async move {
         context.progress(
             "vault unlock",
@@ -242,8 +252,16 @@ async fn unlock_runtime(runtime: AppRuntime, tasks: TaskManager) -> Result<(), S
             "Retrieving the vault key from Secret Service",
         );
         let outcome = tauri::async_runtime::spawn_blocking(move || {
-            unlock_registered_vault(&SystemVaultPlatform, &registration)
-                .map_err(|error| error.to_string())
+            let vault = unlock_registered_vault(&SystemVaultPlatform, &registration)
+                .map_err(|error| error.to_string())?;
+            let journal = TaskJournal::new(
+                vault.database.clone(),
+                ObjectStore::new(vault.vault.clone()),
+            );
+            task_manager
+                .attach_journal(journal)
+                .map_err(|error| error.to_string())?;
+            Ok(vault)
         })
         .await
         .map_err(|error| format!("vault unlock worker failed: {error}"))

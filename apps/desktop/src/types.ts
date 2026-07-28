@@ -11,6 +11,7 @@ export interface RuntimeStatus {
   vault_registered: boolean;
   vault_id: string | null;
   unlock_error: string | null;
+  task_journal_error: string | null;
   prerequisites: Record<string, boolean>;
 }
 export interface VaultPaths { cipher_dir: string; mount_dir: string; }

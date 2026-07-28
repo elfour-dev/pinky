@@ -16,7 +16,7 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Recovery-passphrase wrapping, domain-separated keys, and transactional onboarding tests
 - [ ] Live gocryptfs and Secret Service onboarding acceptance on the target host
 - [x] Registered-vault discovery and Secret Service unlock after restart
-- [ ] Durable event-log objects and startup interruption recovery
+- [x] Durable event-log objects and startup interruption recovery
 - [ ] Supervised child-process SIGTERM/SIGKILL escalation
 - [ ] Stage-one Tauri end-to-end and clean-machine tests
 
@@ -47,6 +47,13 @@ Restart tests cover bounded, owner-only registration metadata, strict schema and
 recovery-identity validation, Secret Service key retrieval, remounting, and
 SQLCipher reopening. Corrupt registration is reported and is never overwritten
 by a new setup.
+
+Task-journal tests cover full monotonic event histories in compressed,
+content-addressed vault objects; SQLCipher object references and reference-count
+replacement; restart conversion from `running` to durable
+`failed_interrupted`; and refusal to recover a checksum-corrupt log. The
+desktop attaches this journal immediately after vault creation or unlock and
+reports later persistence failures in runtime status.
 
 ## Architecture boundaries
 

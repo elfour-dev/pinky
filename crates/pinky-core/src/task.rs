@@ -14,6 +14,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::{TaskJournal, TaskJournalError};
+
 const EVENT_SCHEMA_MAJOR: u16 = 1;
 const EVENT_SCHEMA_MINOR: u16 = 0;
 
@@ -65,7 +67,7 @@ pub struct TaskEvent {
 struct TaskControl {
     cancellation: CancellationToken,
     pause: watch::Sender<bool>,
-    handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
     last: TaskEvent,
 }
 
@@ -132,6 +134,8 @@ pub struct TaskManager {
 struct Inner {
     sequence: u64,
     tasks: HashMap<Uuid, TaskControl>,
+    journal: Option<TaskJournal>,
+    journal_error: Option<String>,
 }
 
 impl Default for TaskManager {
@@ -147,6 +151,8 @@ impl TaskManager {
             inner: Arc::new(Mutex::new(Inner {
                 sequence: 0,
                 tasks: HashMap::new(),
+                journal: None,
+                journal_error: None,
             })),
             events,
         }
@@ -269,11 +275,11 @@ impl TaskManager {
             TaskControl {
                 cancellation: control_cancellation,
                 pause,
-                handle,
+                handle: Some(handle),
                 last: queued.clone(),
             },
         );
-        let _ = self.events.send(queued);
+        self.publish(queued);
         let _ = start_tx.send(());
         id
     }
@@ -345,10 +351,63 @@ impl TaskManager {
         tokio::time::sleep(Duration::from_secs(10)).await;
         let inner = self.inner.lock().unwrap();
         if let Some(control) = inner.tasks.get(&id) {
-            if !control.handle.is_finished() {
-                control.handle.abort();
+            if let Some(handle) = &control.handle {
+                if !handle.is_finished() {
+                    handle.abort();
+                }
             }
         }
+    }
+
+    pub fn attach_journal(&self, journal: TaskJournal) -> Result<Vec<Uuid>, TaskJournalError> {
+        let maximum_sequence = journal.maximum_sequence()?;
+        let interrupted = journal.interrupted()?;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.journal.is_some() {
+                return Ok(Vec::new());
+            }
+            inner.sequence = inner.sequence.max(maximum_sequence);
+            inner.journal = Some(journal);
+            inner.journal_error = None;
+            for event in &interrupted {
+                let (pause, _) = watch::channel(false);
+                inner
+                    .tasks
+                    .entry(event.task_id)
+                    .or_insert_with(|| TaskControl {
+                        cancellation: CancellationToken::new(),
+                        pause,
+                        handle: None,
+                        last: event.clone(),
+                    });
+            }
+        }
+
+        let mut recovered = Vec::with_capacity(interrupted.len());
+        for event in interrupted {
+            recovered.push(event.task_id);
+            self.transition(
+                event.task_id,
+                TaskState::FailedInterrupted,
+                event.phase.name,
+                event.phase.progress,
+                "Interrupted by application restart",
+                false,
+                Some(StructuredError {
+                    code: "failed_interrupted".into(),
+                    message:
+                        "The application stopped before this task reached a durable terminal state"
+                            .into(),
+                    recoverable: true,
+                }),
+            );
+        }
+        Ok(recovered)
+    }
+
+    pub fn journal_error(&self) -> Option<String> {
+        self.inner.lock().unwrap().journal_error.clone()
     }
 
     pub fn snapshot(&self) -> Vec<TaskEvent> {
@@ -390,6 +449,16 @@ impl TaskManager {
         );
         if let Some(control) = self.inner.lock().unwrap().tasks.get_mut(&id) {
             control.last = event.clone();
+        }
+        self.publish(event);
+    }
+
+    fn publish(&self, event: TaskEvent) {
+        let journal = self.inner.lock().unwrap().journal.clone();
+        if let Some(journal) = journal {
+            if let Err(error) = journal.append(&event) {
+                self.inner.lock().unwrap().journal_error = Some(error.to_string());
+            }
         }
         let _ = self.events.send(event);
     }

@@ -3,6 +3,7 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -79,7 +80,7 @@ pub trait VaultPlatform {
 pub struct OnboardedVault<M> {
     pub id: Uuid,
     pub vault: Vault,
-    pub database: Database,
+    pub database: Arc<Mutex<Database>>,
     pub recovery_path: PathBuf,
     pub mount: M,
 }
@@ -210,7 +211,7 @@ fn create_vault_inner<P: VaultPlatform>(
     Ok(OnboardedVault {
         id: vault_id,
         vault,
-        database,
+        database: Arc::new(Mutex::new(database)),
         recovery_path,
         mount,
     })
@@ -302,7 +303,7 @@ pub fn unlock_registered_vault<P: VaultPlatform>(
         Ok(OnboardedVault {
             id: registration.vault_id,
             vault,
-            database,
+            database: Arc::new(Mutex::new(database)),
             recovery_path: registration.recovery_path.clone(),
             mount,
         })
