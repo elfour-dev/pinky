@@ -16,7 +16,9 @@ The executable stage-one foundation currently includes:
 - transactional vault creation using gocryptfs and Linux Secret Service, with a
   passphrase-protected recovery envelope and domain-separated storage keys;
 - monotonic task events, task trees, pause checkpoints, cooperative cancellation,
-  and a ten-second hard abort deadline for in-process workers;
+  and a twelve-second final abort deadline for in-process workers;
+- task-bound process-group supervision that sends `SIGTERM` after two seconds,
+  `SIGKILL` after ten seconds, and prevents descendants from becoming orphans;
 - compressed task-event histories retained as referenced vault objects, with
   interrupted work durably changed to `failed_interrupted` after restart;
 - a three-region UI, live xterm event log, task controls, and a Three.js entity

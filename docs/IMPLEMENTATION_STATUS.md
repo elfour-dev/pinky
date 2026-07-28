@@ -17,7 +17,7 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [ ] Live gocryptfs and Secret Service onboarding acceptance on the target host
 - [x] Registered-vault discovery and Secret Service unlock after restart
 - [x] Durable event-log objects and startup interruption recovery
-- [ ] Supervised child-process SIGTERM/SIGKILL escalation
+- [x] Supervised child-process SIGTERM/SIGKILL escalation
 - [ ] Stage-one Tauri end-to-end and clean-machine tests
 
 ## Stages 2–6
@@ -54,6 +54,13 @@ replacement; restart conversion from `running` to durable
 `failed_interrupted`; and refusal to recover a checksum-corrupt log. The
 desktop attaches this journal immediately after vault creation or unlock and
 reports later persistence failures in runtime status.
+
+Process-supervision tests cover normal exit status, task-bound cancellation,
+whole-process-group `SIGTERM`, escalation to `SIGKILL` when termination is
+ignored, descendant cleanup on cancellation and future abort, and preservation
+of cancellation failures. A
+post-`SIGKILL` reap timeout reports possible kernel-level uninterruptible sleep
+instead of emitting a successful cancellation state.
 
 ## Architecture boundaries
 

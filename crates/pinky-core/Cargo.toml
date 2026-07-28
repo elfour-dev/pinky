@@ -11,6 +11,7 @@ chacha20poly1305 = "0.10"
 chrono.workspace = true
 hex.workspace = true
 hkdf = "0.12"
+libc = "0.2"
 rand = "0.8"
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl", "uuid", "chrono"] }
 serde.workspace = true

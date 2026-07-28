@@ -8,16 +8,18 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::{
+    process::Command,
     sync::{broadcast, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{TaskJournal, TaskJournalError};
+use crate::{ProcessError, ProcessOutcome, ProcessSupervisor, TaskJournal, TaskJournalError};
 
 const EVENT_SCHEMA_MAJOR: u16 = 1;
 const EVENT_SCHEMA_MINOR: u16 = 0;
+const FORCE_ABORT_DEADLINE: Duration = Duration::from_secs(12);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +121,12 @@ impl TaskContext {
             self.cancellable,
             None,
         );
+    }
+
+    pub async fn run_process(&self, command: Command) -> Result<ProcessOutcome, ProcessError> {
+        ProcessSupervisor::new()
+            .run(command, self.cancellation.clone())
+            .await
     }
 }
 
@@ -233,8 +241,21 @@ impl TaskManager {
                 );
             }
             let result = work(context).await;
-            if cancellation.is_cancelled() {
-                manager.transition(
+            match (cancellation.is_cancelled(), result) {
+                (true, Err(message)) if message != "cancelled" => manager.transition(
+                    id,
+                    TaskState::Failed,
+                    kind,
+                    None,
+                    "Cancellation failed",
+                    false,
+                    Some(StructuredError {
+                        code: "cancellation_failed".into(),
+                        message,
+                        recoverable: false,
+                    }),
+                ),
+                (true, _) => manager.transition(
                     id,
                     TaskState::Cancelled,
                     kind,
@@ -242,9 +263,8 @@ impl TaskManager {
                     "Cancelled",
                     false,
                     None,
-                );
-            } else if let Err(message) = result {
-                manager.transition(
+                ),
+                (false, Err(message)) => manager.transition(
                     id,
                     TaskState::Failed,
                     kind,
@@ -256,9 +276,8 @@ impl TaskManager {
                         message,
                         recoverable: true,
                     }),
-                );
-            } else {
-                manager.transition(
+                ),
+                (false, Ok(())) => manager.transition(
                     id,
                     TaskState::Completed,
                     kind,
@@ -266,7 +285,7 @@ impl TaskManager {
                     "Completed",
                     false,
                     None,
-                );
+                ),
             }
         });
 
@@ -348,7 +367,7 @@ impl TaskManager {
     }
 
     pub async fn enforce_cancel_deadlines(&self, id: Uuid) {
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(FORCE_ABORT_DEADLINE).await;
         let inner = self.inner.lock().unwrap();
         if let Some(control) = inner.tasks.get(&id) {
             if let Some(handle) = &control.handle {
@@ -554,5 +573,62 @@ mod tests {
                 .unwrap()
                 .cancellable
         );
+    }
+
+    #[tokio::test]
+    async fn task_cancellation_reaches_a_supervised_process() {
+        let manager = TaskManager::new();
+        let id = manager.spawn("process fixture", None, |context| async move {
+            let mut command = Command::new("/usr/bin/tail");
+            command.args(["-f", "/dev/null"]);
+            context
+                .run_process(command)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        });
+        assert!(manager.cancel(id));
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let state = manager
+                    .snapshot()
+                    .into_iter()
+                    .find(|event| event.task_id == id)
+                    .unwrap()
+                    .state;
+                if state == TaskState::Cancelled {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_failure_is_not_reported_as_cancelled() {
+        let manager = TaskManager::new();
+        let id = manager.spawn("failure fixture", None, |context| async move {
+            context.cancellation_token().cancelled().await;
+            Err("process remained in uninterruptible sleep".into())
+        });
+        assert!(manager.cancel(id));
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                let event = manager
+                    .snapshot()
+                    .into_iter()
+                    .find(|event| event.task_id == id)
+                    .unwrap();
+                if event.state == TaskState::Failed {
+                    assert_eq!(event.error.unwrap().code, "cancellation_failed");
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

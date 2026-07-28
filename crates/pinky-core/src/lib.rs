@@ -7,6 +7,7 @@
 pub mod database;
 pub mod object_store;
 pub mod onboarding;
+pub mod process;
 pub mod recovery;
 pub mod task;
 pub mod task_journal;
@@ -21,6 +22,7 @@ pub use onboarding::{
     write_registration, GocryptfsMount, OnboardedVault, OnboardingError, SystemVaultPlatform,
     VaultPaths, VaultPlatform, VaultRegistration,
 };
+pub use process::{ProcessError, ProcessOutcome, ProcessSupervisor, ProcessTermination};
 pub use recovery::{RecoveryEnvelope, RecoveryError, VaultKey, VaultSubkeys};
 pub use task::{TaskEvent, TaskManager, TaskPhase, TaskState};
 pub use task_journal::{TaskJournal, TaskJournalError};
