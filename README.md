@@ -24,9 +24,10 @@ The executable stage-one foundation currently includes:
 - a three-region UI, live xterm event log, task controls, and a Three.js entity
   driven by task state, including reduced motion and a non-WebGL fallback.
 
-Vault creation and restart-time unlocking are ready for native acceptance on a
-host with the required Linux packages, but this checkout's host does not
-currently provide them. Ingestion, retrieval, models, research, generated-code
+Live core acceptance now covers real gocryptfs creation, Secret Service key
+storage, unmounting, restart-time unlocking, and encrypted object recovery on
+the target host. Native Tauri compilation still requires the missing Linux
+development packages. Ingestion, retrieval, models, research, generated-code
 containers, image generation, backup/restore, and release packaging remain
 gated work. The UI intentionally refuses conversations and retained-data
 operations while the vault is unavailable.
@@ -43,6 +44,13 @@ npm test
 npm run build
 cd ../..
 cargo test --workspace
+```
+
+With a desktop Secret Service session and `/dev/fuse` access, run the opt-in
+live vault acceptance test with:
+
+```bash
+cargo test -p pinky-core --test live_onboarding -- --ignored
 ```
 
 Run the desktop application with:

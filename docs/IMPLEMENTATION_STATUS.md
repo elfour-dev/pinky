@@ -14,7 +14,7 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Cooperative in-process cancellation and hard abort deadline
 - [x] Three-region task UI and task-state entity
 - [x] Recovery-passphrase wrapping, domain-separated keys, and transactional onboarding tests
-- [ ] Live gocryptfs and Secret Service onboarding acceptance on the target host
+- [x] Live gocryptfs and Secret Service onboarding acceptance on the target host
 - [x] Registered-vault discovery and Secret Service unlock after restart
 - [x] Durable event-log objects and startup interruption recovery
 - [x] Supervised child-process SIGTERM/SIGKILL escalation
@@ -40,8 +40,11 @@ remains an unchecked stage-one gate.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and
-failure rollback. Live acceptance remains blocked because this host also lacks
-`gocryptfs` and `secret-tool`.
+failure rollback. The opt-in target-host acceptance test also passed with real
+gocryptfs and Secret Service: it created and mounted a temporary vault, retained
+and verified an encrypted object, unmounted, reopened the registered vault from
+its stored root key, verified the same object, and removed the temporary secret
+and vault.
 
 Restart tests cover bounded, owner-only registration metadata, strict schema and
 recovery-identity validation, Secret Service key retrieval, remounting, and
