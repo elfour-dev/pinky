@@ -6,10 +6,17 @@
 
 pub mod database;
 pub mod object_store;
+pub mod onboarding;
+pub mod recovery;
 pub mod task;
 pub mod vault;
 
 pub use database::{Database, DatabaseError};
 pub use object_store::{CompressionClass, ObjectMetadata, ObjectStore, StoredObject};
+pub use onboarding::{
+    create_vault, GocryptfsMount, OnboardedVault, OnboardingError, SystemVaultPlatform, VaultPaths,
+    VaultPlatform,
+};
+pub use recovery::{RecoveryEnvelope, RecoveryError, VaultKey, VaultSubkeys};
 pub use task::{TaskEvent, TaskManager, TaskPhase, TaskState};
 pub use vault::{MountVerifier, ProcMountVerifier, Vault, VaultError};

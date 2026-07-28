@@ -13,7 +13,9 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Versioned task event contract
 - [x] Cooperative in-process cancellation and hard abort deadline
 - [x] Three-region task UI and task-state entity
-- [ ] Secret Service key wrapping and recovery-passphrase onboarding
+- [x] Recovery-passphrase wrapping, domain-separated keys, and transactional onboarding tests
+- [ ] Live gocryptfs and Secret Service onboarding acceptance on the target host
+- [ ] Registered-vault discovery and Secret Service unlock after restart
 - [ ] Durable event-log objects and startup interruption recovery
 - [ ] Supervised child-process SIGTERM/SIGKILL escalation
 - [ ] Stage-one Tauri end-to-end and clean-machine tests
@@ -35,6 +37,11 @@ because this host lacks `pkg-config` and the D-Bus development package; the
 later WebKit/GTK development packages may also be required. Installing host
 packages was outside this implementation run, so native end-to-end testing
 remains an unchecked stage-one gate.
+
+The onboarding transaction is covered through a platform test double, including
+authenticated recovery, path and symlink boundaries, SQLCipher creation, and
+failure rollback. Live acceptance remains blocked because this host also lacks
+`gocryptfs` and `secret-tool`.
 
 ## Architecture boundaries
 

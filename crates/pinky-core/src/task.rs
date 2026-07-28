@@ -75,6 +75,7 @@ pub struct TaskContext {
     cancellation: CancellationToken,
     pause: watch::Receiver<bool>,
     manager: TaskManager,
+    cancellable: bool,
 }
 
 impl TaskContext {
@@ -113,7 +114,7 @@ impl TaskContext {
             name,
             progress,
             activity,
-            true,
+            self.cancellable,
             None,
         );
     }
@@ -160,6 +161,33 @@ impl TaskManager {
         F: FnOnce(TaskContext) -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
+        self.spawn_internal(kind, parent_id, true, work)
+    }
+
+    pub fn spawn_uncancellable<F, Fut>(
+        &self,
+        kind: impl Into<String>,
+        parent_id: Option<Uuid>,
+        work: F,
+    ) -> Uuid
+    where
+        F: FnOnce(TaskContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), String>> + Send + 'static,
+    {
+        self.spawn_internal(kind, parent_id, false, work)
+    }
+
+    fn spawn_internal<F, Fut>(
+        &self,
+        kind: impl Into<String>,
+        parent_id: Option<Uuid>,
+        cancellable: bool,
+        work: F,
+    ) -> Uuid
+    where
+        F: FnOnce(TaskContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), String>> + Send + 'static,
+    {
         let id = Uuid::new_v4();
         let kind = kind.into();
         let cancellation = CancellationToken::new();
@@ -171,6 +199,7 @@ impl TaskManager {
             cancellation: cancellation.clone(),
             pause: pause_rx,
             manager: manager.clone(),
+            cancellable,
         };
         let (start_tx, start_rx) = oneshot::channel();
 
@@ -181,7 +210,7 @@ impl TaskManager {
             &kind,
             Some(0.0),
             "Queued",
-            true,
+            cancellable,
             None,
         );
         let handle = tokio::spawn(async move {
@@ -193,7 +222,7 @@ impl TaskManager {
                     kind.clone(),
                     Some(0.0),
                     "Started",
-                    true,
+                    cancellable,
                     None,
                 );
             }
@@ -255,6 +284,9 @@ impl TaskManager {
             let Some(control) = inner.tasks.get_mut(&id) else {
                 return false;
             };
+            if !control.last.cancellable {
+                return false;
+            }
             control.cancellation.clone()
         };
         self.transition(
@@ -276,6 +308,9 @@ impl TaskManager {
             let Some(control) = inner.tasks.get(&id) else {
                 return false;
             };
+            if !control.last.cancellable {
+                return false;
+            }
             if control.pause.send(paused).is_err() {
                 return false;
             }
@@ -431,5 +466,24 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn uncancellable_tasks_reject_stop_and_pause_requests() {
+        let manager = TaskManager::new();
+        let id = manager.spawn_uncancellable("vault setup", None, |_context| async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Ok(())
+        });
+        assert!(!manager.cancel(id));
+        assert!(!manager.pause(id, true));
+        assert!(
+            !manager
+                .snapshot()
+                .into_iter()
+                .find(|event| event.task_id == id)
+                .unwrap()
+                .cancellable
+        );
     }
 }

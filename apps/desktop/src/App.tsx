@@ -1,13 +1,13 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { BookOpen, Box, ChevronRight, CirclePause, Database, FolderKey, MessageSquare, OctagonX, Play, Plus, Search, ShieldCheck, Square } from "lucide-react";
+import { BookOpen, Box, ChevronRight, CirclePause, Database, FolderKey, KeyRound, LockKeyhole, MessageSquare, OctagonX, Play, Plus, Search, ShieldCheck, Square, X } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
-import type { RuntimeStatus, TaskEvent } from "./types";
+import type { RuntimeStatus, SetupVaultResponse, TaskEvent, VaultPaths } from "./types";
 
-const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
+const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_id: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
 
 function ActivityTerminal({ events }: { events: TaskEvent[] }) {
@@ -32,6 +32,13 @@ export function App() {
   const [status, setStatus] = useState(EMPTY_STATUS);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [message, setMessage] = useState("");
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupPaths, setSetupPaths] = useState<VaultPaths>({ cipher_dir: "", mount_dir: "" });
+  const [passphrase, setPassphrase] = useState("");
+  const [passphraseConfirmation, setPassphraseConfirmation] = useState("");
+  const [setupError, setSetupError] = useState("");
+  const [setupResult, setSetupResult] = useState<SetupVaultResponse | null>(null);
+  const [setupRunning, setSetupRunning] = useState(false);
   const [listening, setListening] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(() => matchMedia("(prefers-reduced-motion: reduce)").matches);
   const tasks = useMemo(() => Object.values(events.reduce<Record<string, TaskEvent>>((latest, event) => ({ ...latest, [event.task_id]: event }), {})).sort((a, b) => b.sequence - a.sequence), [events]);
@@ -70,6 +77,33 @@ export function App() {
     if (!message.trim()) return;
     if (!status.vault_mounted) { setMessage(""); return; }
   };
+  const closeSetup = () => {
+    if (setupRunning) return;
+    setPassphrase(""); setPassphraseConfirmation(""); setSetupError(""); setSetupOpen(false);
+  };
+  const openSetup = async () => {
+    setPassphrase(""); setPassphraseConfirmation(""); setSetupError(""); setSetupResult(null); setSetupOpen(true);
+    if (IS_TAURI) {
+      const paths = await invoke<VaultPaths>("default_vault_paths").catch(() => null);
+      if (paths) setSetupPaths(paths);
+    } else {
+      setSetupPaths({ cipher_dir: "/home/you/.local/share/pinky/vault-cipher", mount_dir: "/home/you/.cache/pinky/vault-mounted" });
+    }
+  };
+  const runSetup = async (event: FormEvent) => {
+    event.preventDefault(); setSetupError("");
+    if (passphrase.length < 12) { setSetupError("Use a recovery passphrase containing at least 12 characters."); return; }
+    if (passphrase !== passphraseConfirmation) { setSetupError("The recovery passphrases do not match."); return; }
+    if (!IS_TAURI) { setSetupError("Vault creation runs only in the native Pinky application, not this browser preview."); return; }
+    setSetupRunning(true);
+    try {
+      const result = await invoke<SetupVaultResponse>("setup_vault", { request: { ...setupPaths, recovery_passphrase: passphrase } });
+      setPassphrase(""); setPassphraseConfirmation(""); setSetupResult(result);
+      setStatus(await invoke<RuntimeStatus>("runtime_status"));
+    } catch (error) {
+      setSetupError(String(error));
+    } finally { setSetupRunning(false); }
+  };
 
   return <main className="app-shell">
     <a className="skip-link" href="#conversation">Skip to conversation</a>
@@ -90,7 +124,7 @@ export function App() {
       <div className="conversation">
         <div className="entity-stage"><AsciiEntity state={entityState} reducedMotion={reducedMotion} /><span className={`state-pill ${entityState}`} aria-live="polite"><i /> {entityState}</span></div>
         <div className="welcome"><p className="eyebrow">ENCRYPTED · LOCAL · SOURCE-GROUNDED</p><h1>What should we understand<br />or create?</h1><p>Pinky retains approved evidence inside your encrypted vault and shows every operation while it works.</p></div>
-        {!status.vault_mounted && <div className="blocking-question" role="alert"><FolderKey size={19} /><div><strong>Set up the encrypted vault to begin</strong><p>Ingestion, conversations, generation, and logs stay disabled until gocryptfs and Secret Service are ready.</p></div><button>Start setup</button></div>}
+        {!status.vault_mounted && <div className="blocking-question" role="alert"><FolderKey size={19} /><div><strong>Set up the encrypted vault to begin</strong><p>Ingestion, conversations, generation, and logs stay disabled until gocryptfs and Secret Service are ready.</p></div><button onClick={openSetup}>Start setup</button></div>}
       </div>
       <form className="composer" onSubmit={submit}>
         <textarea aria-label="Message Pinky" value={message} onChange={(event) => setMessage(event.target.value)} onFocus={() => setListening(true)} onBlur={() => setListening(false)} placeholder={status.vault_mounted ? "Ask from your sources or describe what to create…" : "Unlock the encrypted vault to start…"} disabled={!status.vault_mounted} />
@@ -112,6 +146,21 @@ export function App() {
       <section className="runtime"><p className="eyebrow">RUNTIME</p>{Object.entries(status.prerequisites).map(([name, available]) => <div key={name}><span>{name.replace("_", " ")}</span><b className={available ? "ok" : "missing"}>{available ? "ready" : "missing"}</b></div>)}</section>
       <section className="log-panel"><div className="log-title"><span>Live event log</span><span>schema 1.0</span></div><ActivityTerminal events={events} /></section>
     </aside>
+    {setupOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeSetup(); }}>
+      <section className="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+        <header><div><p className="eyebrow">ENCRYPTED VAULT</p><h2 id="setup-title">Create your private vault</h2></div><button aria-label="Close setup" disabled={setupRunning} onClick={closeSetup}><X size={17} /></button></header>
+        {setupResult ? <div className="setup-complete"><ShieldCheck size={34} /><h3>Vault created and mounted</h3><p>Your recovery envelope is stored at:</p><code>{setupResult.recovery_path}</code><p>Keep your recovery passphrase somewhere safe. Pinky does not retain it.</p><button onClick={closeSetup}>Continue</button></div> : <form onSubmit={runSetup}>
+          <div className="setup-intro"><LockKeyhole size={21} /><p>Pinky generates a random 256-bit key. Secret Service protects it for daily use; your passphrase protects a separate recovery envelope.</p></div>
+          <label>Encrypted data directory<input value={setupPaths.cipher_dir} onChange={(event) => setSetupPaths((paths) => ({ ...paths, cipher_dir: event.target.value }))} spellCheck={false} required /></label>
+          <label>Unlocked mount directory<input value={setupPaths.mount_dir} onChange={(event) => setSetupPaths((paths) => ({ ...paths, mount_dir: event.target.value }))} spellCheck={false} required /></label>
+          <div className="passphrase-grid"><label>Recovery passphrase<input type="password" autoComplete="new-password" value={passphrase} onChange={(event) => setPassphrase(event.target.value)} minLength={12} required /></label><label>Confirm passphrase<input type="password" autoComplete="new-password" value={passphraseConfirmation} onChange={(event) => setPassphraseConfirmation(event.target.value)} minLength={12} required /></label></div>
+          <div className="setup-warning"><KeyRound size={17} /><span>If both Secret Service and this passphrase are lost, the vault cannot be recovered.</span></div>
+          {(!status.prerequisites.gocryptfs || !status.prerequisites.secret_service) && <p className="setup-error" role="alert">Install gocryptfs and Secret Service tools before creating the vault.</p>}
+          {setupError && <p className="setup-error" role="alert">{setupError}</p>}
+          <footer><button type="button" disabled={setupRunning} onClick={closeSetup}>Cancel</button><button className="primary" disabled={setupRunning || !status.prerequisites.gocryptfs || !status.prerequisites.secret_service}>{setupRunning ? "Creating encrypted vault…" : "Create vault"}</button></footer>
+        </form>}
+      </section>
+    </div>}
   </main>;
 }
 

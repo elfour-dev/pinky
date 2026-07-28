@@ -5,4 +5,11 @@ export interface TaskEvent {
   permission_state: string; budget_state: string; cancellable: boolean;
   error: { code: string; message: string; recoverable: boolean } | null;
 }
-export interface RuntimeStatus { vault_mounted: boolean; prerequisites: Record<string, boolean>; }
+export interface RuntimeStatus {
+  vault_mounted: boolean;
+  setup_in_progress: boolean;
+  vault_id: string | null;
+  prerequisites: Record<string, boolean>;
+}
+export interface VaultPaths { cipher_dir: string; mount_dir: string; }
+export interface SetupVaultResponse { vault_id: string; recovery_path: string; }
