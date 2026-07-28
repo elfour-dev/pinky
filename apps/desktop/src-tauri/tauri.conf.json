@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pinky",
+  "version": "0.1.0",
+  "identifier": "dev.pinky.desktop",
+  "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
+  "app": {
+    "windows": [{ "title": "Pinky", "width": 1440, "height": 900, "minWidth": 1040, "minHeight": 700, "resizable": true, "fullscreen": false }],
+    "security": { "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; font-src 'self'" }
+  },
+  "bundle": { "active": true, "targets": ["deb", "appimage"], "category": "Productivity", "shortDescription": "Private, source-grounded local intelligence" }
+}
