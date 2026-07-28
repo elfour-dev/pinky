@@ -1,18 +1,19 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap, HashSet},
     env, fs,
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use pinky_core::{
     create_registered_vault, read_registration, unlock_registered_vault, GocryptfsMount,
-    LocalIngestor, ObjectStore, OnboardedVault, SourceSummary, SystemVaultPlatform, TaskJournal,
-    TaskManager, VaultPaths, VaultRegistration,
+    LocalFileFingerprint, LocalIngestor, LocalWatchTarget, ObjectStore, OnboardedVault,
+    SourceSummary, SystemVaultPlatform, TaskJournal, TaskManager, VaultPaths, VaultRegistration,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -24,6 +25,7 @@ struct RuntimeStatus {
     vault_id: Option<Uuid>,
     unlock_error: Option<String>,
     task_journal_error: Option<String>,
+    watcher_error: Option<String>,
     prerequisites: BTreeMap<&'static str, bool>,
 }
 
@@ -32,6 +34,7 @@ struct RuntimeData {
     setup_in_progress: bool,
     registration: Option<VaultRegistration>,
     unlock_error: Option<String>,
+    watcher_error: Option<String>,
     vault: Option<OnboardedVault<GocryptfsMount>>,
 }
 
@@ -39,6 +42,7 @@ struct RuntimeData {
 struct AppRuntime {
     data: Arc<Mutex<RuntimeData>>,
     registration_path: Arc<PathBuf>,
+    watcher: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl AppRuntime {
@@ -52,9 +56,11 @@ impl AppRuntime {
                 setup_in_progress: false,
                 registration,
                 unlock_error: error,
+                watcher_error: None,
                 vault: None,
             })),
             registration_path: Arc::new(registration_path),
+            watcher: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -96,6 +102,7 @@ fn runtime_status(runtime: State<'_, AppRuntime>, tasks: State<'_, TaskManager>)
         }),
         unlock_error: data.unlock_error.clone(),
         task_journal_error: tasks.journal_error(),
+        watcher_error: data.watcher_error.clone(),
         prerequisites: BTreeMap::from([
             ("gocryptfs", command_exists("gocryptfs")),
             ("podman", command_exists("podman")),
@@ -210,6 +217,8 @@ async fn setup_vault(
             data.registration = Some(registration);
             data.unlock_error = None;
             data.vault = Some(vault);
+            drop(data);
+            start_local_watcher(runtime.clone(), tasks.inner().clone());
             Ok(response)
         }
         Err(error) => {
@@ -296,6 +305,8 @@ async fn unlock_runtime(runtime: AppRuntime, tasks: TaskManager) -> Result<(), S
         Ok(vault) => {
             data.vault = Some(vault);
             data.unlock_error = None;
+            drop(data);
+            start_local_watcher(runtime.clone(), tasks.clone());
             Ok(())
         }
         Err(error) => {
@@ -350,6 +361,246 @@ fn local_ingestor(runtime: &AppRuntime) -> Result<LocalIngestor, String> {
         vault.database.clone(),
         ObjectStore::new(vault.vault.clone()),
     ))
+}
+
+struct PendingObservation {
+    fingerprint: LocalFileFingerprint,
+    first_seen: Instant,
+    confirmations: u8,
+}
+
+struct WatchCompletion {
+    source_id: Uuid,
+    succeeded: bool,
+    sender: tokio::sync::mpsc::UnboundedSender<(Uuid, bool)>,
+}
+
+impl Drop for WatchCompletion {
+    fn drop(&mut self) {
+        let _ = self.sender.send((self.source_id, self.succeeded));
+    }
+}
+
+fn stable_change_ready(
+    pending: &mut HashMap<Uuid, PendingObservation>,
+    source_id: Uuid,
+    fingerprint: LocalFileFingerprint,
+    now: Instant,
+) -> bool {
+    let observation = pending
+        .entry(source_id)
+        .or_insert_with(|| PendingObservation {
+            fingerprint: fingerprint.clone(),
+            first_seen: now,
+            confirmations: 0,
+        });
+    if observation.fingerprint != fingerprint {
+        *observation = PendingObservation {
+            fingerprint,
+            first_seen: now,
+            confirmations: 0,
+        };
+    }
+    observation.confirmations = observation.confirmations.saturating_add(1);
+    observation.confirmations >= 2
+        && now.duration_since(observation.first_seen) >= Duration::from_millis(750)
+}
+
+fn start_local_watcher(runtime: AppRuntime, tasks: TaskManager) {
+    let mut watcher = runtime.watcher.lock().unwrap();
+    if watcher.is_some() {
+        return;
+    }
+    let ingestor = match local_ingestor(&runtime) {
+        Ok(ingestor) => ingestor,
+        Err(error) => {
+            runtime.data.lock().unwrap().watcher_error = Some(error);
+            return;
+        }
+    };
+    let cancellation = CancellationToken::new();
+    *watcher = Some(cancellation.clone());
+    drop(watcher);
+    tauri::async_runtime::spawn(run_local_watcher(runtime, tasks, ingestor, cancellation));
+}
+
+async fn run_local_watcher(
+    runtime: AppRuntime,
+    tasks: TaskManager,
+    ingestor: LocalIngestor,
+    cancellation: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut pending = HashMap::<Uuid, PendingObservation>::new();
+    let mut in_flight = HashSet::<Uuid>::new();
+    let mut cooldown = HashMap::<Uuid, Instant>::new();
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<(Uuid, bool)>();
+
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => break,
+            _ = interval.tick() => {}
+        }
+        while let Ok((source_id, succeeded)) = done_rx.try_recv() {
+            in_flight.remove(&source_id);
+            if succeeded {
+                cooldown.remove(&source_id);
+            } else {
+                cooldown.insert(source_id, Instant::now());
+            }
+        }
+
+        let target_ingestor = ingestor.clone();
+        let targets =
+            match tauri::async_runtime::spawn_blocking(move || target_ingestor.watch_targets())
+                .await
+            {
+                Ok(Ok(targets)) => targets,
+                Ok(Err(error)) => {
+                    runtime.data.lock().unwrap().watcher_error = Some(error.to_string());
+                    continue;
+                }
+                Err(error) => {
+                    runtime.data.lock().unwrap().watcher_error =
+                        Some(format!("local watcher worker failed: {error}"));
+                    continue;
+                }
+            };
+        runtime.data.lock().unwrap().watcher_error = None;
+
+        let known = targets
+            .iter()
+            .map(|target| target.source_id)
+            .collect::<HashSet<_>>();
+        pending.retain(|source_id, _| known.contains(source_id));
+        cooldown.retain(|source_id, _| known.contains(source_id));
+
+        for target in targets {
+            if in_flight.contains(&target.source_id)
+                || cooldown
+                    .get(&target.source_id)
+                    .is_some_and(|last| last.elapsed() < Duration::from_secs(30))
+            {
+                continue;
+            }
+            match LocalFileFingerprint::read(&target.source_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    pending.remove(&target.source_id);
+                    if target.state != "missing" {
+                        in_flight.insert(target.source_id);
+                        spawn_missing_source_task(
+                            &tasks,
+                            ingestor.clone(),
+                            target.source_id,
+                            done_tx.clone(),
+                        );
+                    }
+                }
+                Err(error) => {
+                    runtime.data.lock().unwrap().watcher_error = Some(format!(
+                        "cannot observe {}: {error}",
+                        target.source_path.display()
+                    ));
+                }
+                Ok(fingerprint)
+                    if target.state == "missing"
+                        || target.fingerprint.as_ref() != Some(&fingerprint) =>
+                {
+                    let now = Instant::now();
+                    if stable_change_ready(&mut pending, target.source_id, fingerprint, now) {
+                        pending.remove(&target.source_id);
+                        in_flight.insert(target.source_id);
+                        spawn_watched_ingestion_task(
+                            &tasks,
+                            ingestor.clone(),
+                            target,
+                            done_tx.clone(),
+                        );
+                    }
+                }
+                Ok(_) => {
+                    pending.remove(&target.source_id);
+                    cooldown.remove(&target.source_id);
+                }
+            }
+        }
+    }
+}
+
+fn spawn_watched_ingestion_task(
+    tasks: &TaskManager,
+    ingestor: LocalIngestor,
+    target: LocalWatchTarget,
+    done: tokio::sync::mpsc::UnboundedSender<(Uuid, bool)>,
+) {
+    tasks.spawn("local ingestion", None, move |mut context| async move {
+        let mut completion = WatchCompletion {
+            source_id: target.source_id,
+            succeeded: false,
+            sender: done,
+        };
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "local ingestion",
+            Some(0.1),
+            format!(
+                "Refreshing {} after a stable change",
+                target.source_path.display()
+            ),
+        );
+        let cancellation = context.cancellation_token();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            ingestor.ingest_cancellable(target.approved_root, target.source_path, cancellation)
+        })
+        .await
+        .map_err(|error| format!("ingestion worker failed: {error}"))?
+        .map_err(|error| error.to_string());
+        completion.succeeded = result.is_ok();
+        let result = result?;
+        context.progress(
+            "local ingestion",
+            Some(0.95),
+            format!(
+                "Retained refreshed version in {} chunks",
+                result.chunk_count
+            ),
+        );
+        Ok(())
+    });
+}
+
+fn spawn_missing_source_task(
+    tasks: &TaskManager,
+    ingestor: LocalIngestor,
+    source_id: Uuid,
+    done: tokio::sync::mpsc::UnboundedSender<(Uuid, bool)>,
+) {
+    tasks.spawn("local ingestion", None, move |mut context| async move {
+        let mut completion = WatchCompletion {
+            source_id,
+            succeeded: false,
+            sender: done,
+        };
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "local ingestion",
+            Some(0.5),
+            "Marking a deleted local source as missing",
+        );
+        let result = tauri::async_runtime::spawn_blocking(move || ingestor.mark_missing(source_id))
+            .await
+            .map_err(|error| format!("local watcher worker failed: {error}"))?
+            .map_err(|error| error.to_string());
+        completion.succeeded = result.is_ok();
+        result.map(|_| ())
+    });
 }
 
 #[tauri::command]
@@ -445,6 +696,142 @@ fn command_exists(program: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod watcher_tests {
+    use super::*;
+    use pinky_core::{Database, MountVerifier, Vault};
+    use std::path::Path;
+
+    fn fingerprint(byte_size: u64, modified_nanoseconds: i64) -> LocalFileFingerprint {
+        LocalFileFingerprint {
+            device: 1,
+            inode: 2,
+            byte_size,
+            modified_seconds: 100,
+            modified_nanoseconds,
+        }
+    }
+
+    #[test]
+    fn waits_for_stable_checks_and_the_debounce_window() {
+        let id = Uuid::new_v4();
+        let started = Instant::now();
+        let mut pending = HashMap::new();
+        assert!(!stable_change_ready(
+            &mut pending,
+            id,
+            fingerprint(10, 1),
+            started,
+        ));
+        assert!(!stable_change_ready(
+            &mut pending,
+            id,
+            fingerprint(10, 1),
+            started + Duration::from_millis(500),
+        ));
+        assert!(stable_change_ready(
+            &mut pending,
+            id,
+            fingerprint(10, 1),
+            started + Duration::from_millis(1_000),
+        ));
+    }
+
+    #[test]
+    fn changed_fingerprint_restarts_the_stability_window() {
+        let id = Uuid::new_v4();
+        let started = Instant::now();
+        let mut pending = HashMap::new();
+        assert!(!stable_change_ready(
+            &mut pending,
+            id,
+            fingerprint(10, 1),
+            started,
+        ));
+        assert!(!stable_change_ready(
+            &mut pending,
+            id,
+            fingerprint(11, 2),
+            started + Duration::from_millis(800),
+        ));
+        assert!(!stable_change_ready(
+            &mut pending,
+            id,
+            fingerprint(11, 2),
+            started + Duration::from_millis(1_300),
+        ));
+        assert!(stable_change_ready(
+            &mut pending,
+            id,
+            fingerprint(11, 2),
+            started + Duration::from_millis(1_800),
+        ));
+    }
+
+    struct Mounted;
+
+    impl MountVerifier for Mounted {
+        fn is_gocryptfs_mount(&self, _: &Path) -> Result<bool, std::io::Error> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_reversions_stable_edits_and_marks_deletions_missing() {
+        let vault_root = tempfile::tempdir().unwrap();
+        let approved_root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(vault_root.path(), Mounted).unwrap();
+        let database = Arc::new(Mutex::new(
+            Database::open(&vault, Zeroizing::new(vec![0x37; 32])).unwrap(),
+        ));
+        let ingestor = LocalIngestor::new(database, ObjectStore::new(vault));
+        let source = approved_root.path().join("watched.txt");
+        fs::write(&source, "initial watched content").unwrap();
+        let first = ingestor.ingest(approved_root.path(), &source).unwrap();
+
+        let runtime = AppRuntime::new(vault_root.path().join("registration.json"), None, None);
+        let tasks = TaskManager::new();
+        let cancellation = CancellationToken::new();
+        let watcher = tokio::spawn(run_local_watcher(
+            runtime,
+            tasks,
+            ingestor.clone(),
+            cancellation.clone(),
+        ));
+
+        fs::write(&source, "stable replacement watched content").unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let summary = ingestor.list_sources().unwrap().remove(0);
+                if summary.version_id != first.version_id {
+                    break summary;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(second.state, "active");
+
+        fs::remove_file(&source).unwrap();
+        let missing = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let summary = ingestor.list_sources().unwrap().remove(0);
+                if summary.state == "missing" {
+                    break summary;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(missing.version_id, second.version_id);
+
+        cancellation.cancel();
+        watcher.await.unwrap();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

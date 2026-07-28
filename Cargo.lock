@@ -2386,7 +2386,9 @@ dependencies = [
  "serde",
  "tauri",
  "tauri-build",
+ "tempfile",
  "tokio",
+ "tokio-util",
  "uuid",
  "zeroize",
 ]

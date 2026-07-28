@@ -8,7 +8,7 @@ import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
 import type { RuntimeStatus, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
 
-const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
+const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, watcher_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
 
 function ActivityTerminal({ events }: { events: TaskEvent[] }) {
@@ -74,6 +74,11 @@ export function App() {
     const timer = window.setInterval(() => void invoke<RuntimeStatus>("runtime_status").then(setStatus).catch(() => undefined), 250);
     return () => window.clearInterval(timer);
   }, [status.setup_in_progress]);
+  useEffect(() => {
+    if (!IS_TAURI || !status.vault_mounted) return;
+    const timer = window.setInterval(() => void invoke<RuntimeStatus>("runtime_status").then(setStatus).catch(() => undefined), 2_000);
+    return () => window.clearInterval(timer);
+  }, [status.vault_mounted]);
 
   const startCheck = async () => {
     if (!IS_TAURI) { browserDemo(setEvents); return; }
@@ -193,7 +198,7 @@ export function App() {
           {task.error && <p className="task-error">{task.error.message}</p>}
         </article>)}
       </div>
-      <section className="runtime"><p className="eyebrow">RUNTIME</p>{Object.entries(status.prerequisites).map(([name, available]) => <div key={name}><span>{name.replace("_", " ")}</span><b className={available ? "ok" : "missing"}>{available ? "ready" : "missing"}</b></div>)}<div><span>task journal</span><b className={status.task_journal_error ? "missing" : "ok"} title={status.task_journal_error || undefined}>{status.task_journal_error ? "error" : status.vault_mounted ? "durable" : "locked"}</b></div></section>
+      <section className="runtime"><p className="eyebrow">RUNTIME</p>{Object.entries(status.prerequisites).map(([name, available]) => <div key={name}><span>{name.replace("_", " ")}</span><b className={available ? "ok" : "missing"}>{available ? "ready" : "missing"}</b></div>)}<div><span>task journal</span><b className={status.task_journal_error ? "missing" : "ok"} title={status.task_journal_error || undefined}>{status.task_journal_error ? "error" : status.vault_mounted ? "durable" : "locked"}</b></div><div><span>file watcher</span><b className={status.watcher_error ? "missing" : "ok"} title={status.watcher_error || undefined}>{status.watcher_error ? "error" : status.vault_mounted ? "watching" : "locked"}</b></div></section>
       <section className="log-panel"><div className="log-title"><span>Live event log</span><span>schema 1.0</span></div><ActivityTerminal events={events} /></section>
     </aside>
     {setupOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeSetup(); }}>

@@ -15,7 +15,10 @@ pub mod task_journal;
 pub mod vault;
 
 pub use database::{Database, DatabaseError};
-pub use ingestion::{IngestedSource, IngestionError, LocalIngestor, SourceSummary};
+pub use ingestion::{
+    IngestedSource, IngestionError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget,
+    SourceSummary,
+};
 pub use object_store::{
     CompressionClass, ObjectMetadata, ObjectStore, ObjectStoreError, StoredObject,
 };

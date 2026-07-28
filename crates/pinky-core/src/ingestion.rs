@@ -2,7 +2,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom},
     os::fd::AsRawFd,
-    os::unix::fs::OpenOptionsExt,
+    os::unix::{ffi::OsStringExt, fs::MetadataExt, fs::OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -70,6 +70,40 @@ pub struct SourceSummary {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalFileFingerprint {
+    pub device: u64,
+    pub inode: u64,
+    pub byte_size: u64,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: i64,
+}
+
+impl LocalFileFingerprint {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            byte_size: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+        }
+    }
+
+    pub fn read(path: &Path) -> Result<Self, std::io::Error> {
+        Ok(Self::from_metadata(&fs::metadata(path)?))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalWatchTarget {
+    pub source_id: Uuid,
+    pub source_path: PathBuf,
+    pub approved_root: PathBuf,
+    pub fingerprint: Option<LocalFileFingerprint>,
+    pub state: String,
+}
+
 #[derive(Clone)]
 pub struct LocalIngestor {
     database: Arc<Mutex<Database>>,
@@ -124,6 +158,7 @@ impl LocalIngestor {
             .filter(|name| !name.is_empty())
             .ok_or(IngestionError::MissingFileName)?;
         let canonical_uri = file_uri(&source_path);
+        let fingerprint = LocalFileFingerprint::from_metadata(&metadata);
         let mut prefix = [0_u8; 512];
         let prefix_length = source_file.read(&mut prefix)?;
         source_file.seek(SeekFrom::Start(0))?;
@@ -232,8 +267,9 @@ impl LocalIngestor {
             "INSERT INTO source_versions (
                 id, source_id, original_object_hash, extracted_object_hash, mime_type,
                 detected_language, byte_size, extraction_method, extraction_version,
-                retrieved_at, superseded_version_id, processing_state, error, citation_map_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                retrieved_at, selected_headers_json, superseded_version_id, processing_state,
+                error, citation_map_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 version_id.to_string(),
                 source_id.to_string(),
@@ -246,6 +282,7 @@ impl LocalIngestor {
                 extraction.as_ref().map(|_| "builtin_text"),
                 extraction.as_ref().map(|_| EXTRACTION_VERSION),
                 now,
+                serde_json::to_string(&fingerprint)?,
                 previous_version,
                 processing_state,
                 extraction_error,
@@ -333,6 +370,59 @@ impl LocalIngestor {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    pub fn watch_targets(&self) -> Result<Vec<LocalWatchTarget>, IngestionError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| IngestionError::DatabaseLock)?;
+        let mut statement = database.connection().prepare(
+            "SELECT s.id, s.canonical_uri, s.approval_scope, v.selected_headers_json, s.state
+             FROM sources s
+             JOIN source_versions v ON v.id = s.current_version_id
+             WHERE s.kind = 'local_file' AND s.state != 'deleted'
+             ORDER BY s.id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let source_id: String = row.get(0)?;
+            let canonical_uri: String = row.get(1)?;
+            let fingerprint_json: Option<String> = row.get(3)?;
+            let fingerprint = fingerprint_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+            Ok(LocalWatchTarget {
+                source_id: Uuid::parse_str(&source_id)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                source_path: path_from_file_uri(&canonical_uri)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                approved_root: PathBuf::from(row.get::<_, String>(2)?),
+                fingerprint,
+                state: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn mark_missing(&self, source_id: Uuid) -> Result<bool, IngestionError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| IngestionError::DatabaseLock)?;
+        Ok(database.connection().execute(
+            "UPDATE sources
+             SET state = 'missing', last_checked_at = ?1, updated_at = ?1
+             WHERE id = ?2 AND state != 'deleted' AND state != 'missing'",
+            params![Utc::now().to_rfc3339(), source_id.to_string()],
+        )? > 0)
+    }
 }
 
 fn check_cancelled(cancellation: &CancellationToken) -> Result<(), IngestionError> {
@@ -406,6 +496,32 @@ fn file_uri(path: &Path) -> String {
         }
     }
     uri
+}
+
+fn path_from_file_uri(uri: &str) -> Result<PathBuf, IngestionError> {
+    let encoded = uri
+        .strip_prefix("file://")
+        .ok_or(IngestionError::OutsideApprovedRoot)?;
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let pair = bytes
+                .get(index + 1..index + 3)
+                .ok_or(IngestionError::OutsideApprovedRoot)?;
+            let pair =
+                std::str::from_utf8(pair).map_err(|_| IngestionError::OutsideApprovedRoot)?;
+            decoded.push(
+                u8::from_str_radix(pair, 16).map_err(|_| IngestionError::OutsideApprovedRoot)?,
+            );
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(decoded)))
 }
 
 fn detect_mime(path: &Path, prefix: &[u8]) -> String {
@@ -662,5 +778,48 @@ mod tests {
             Err(IngestionError::Cancelled)
         ));
         assert!(ingestor.list_sources().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelled_replacement_preserves_the_previous_current_version() {
+        let (_vault, approved, ingestor) = ingestor();
+        let source = approved.path().join("durable.txt");
+        fs::write(&source, "known good version").unwrap();
+        let first = ingestor.ingest(approved.path(), &source).unwrap();
+        fs::write(&source, "replacement that must not become current").unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        assert!(matches!(
+            ingestor.ingest_cancellable(approved.path(), &source, cancellation),
+            Err(IngestionError::Cancelled)
+        ));
+        let summary = ingestor.list_sources().unwrap().remove(0);
+        assert_eq!(summary.version_id, first.version_id);
+        assert_eq!(summary.state, "active");
+    }
+
+    #[test]
+    fn persists_watch_fingerprints_and_marks_deleted_sources_missing() {
+        let (_vault, approved, ingestor) = ingestor();
+        let source = approved.path().join("watched notes.txt");
+        fs::write(&source, "first retained version").unwrap();
+        let retained = ingestor.ingest(approved.path(), &source).unwrap();
+
+        let targets = ingestor.watch_targets().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].source_path, source);
+        assert_eq!(targets[0].approved_root, approved.path());
+        assert_eq!(
+            targets[0].fingerprint,
+            Some(LocalFileFingerprint::read(&source).unwrap())
+        );
+
+        fs::remove_file(&source).unwrap();
+        assert!(ingestor.mark_missing(retained.source_id).unwrap());
+        let summary = ingestor.list_sources().unwrap().remove(0);
+        assert_eq!(summary.state, "missing");
+        assert_eq!(summary.version_id, retained.version_id);
+        assert!(!ingestor.mark_missing(retained.source_id).unwrap());
     }
 }

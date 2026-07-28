@@ -24,6 +24,8 @@ The executable stage-one foundation currently includes:
 - approved-root ingestion for UTF-8 text, Markdown, logs, source code, JSON,
   YAML, XML, HTML, and CSV, with encrypted originals, versioned metadata,
   overlapping chunks, deduplication, and symlink-escape protection;
+- automatic stable-file refresh after vault unlock, preserving the previous
+  version on failed replacement and marking deleted files as missing;
 - a three-region UI, live xterm event log, task controls, and a Three.js entity
   driven by task state, including reduced motion and a non-WebGL fallback.
 
@@ -32,11 +34,10 @@ storage, unmounting, restart-time unlocking, and encrypted object recovery on
 the target host. Native compilation, WebDriver end-to-end checks, Linux bundle
 inspection, and clean Debian package installation now pass. The first local
 text-ingestion slice is usable from the Sources panel. Additional extractors,
-filesystem watching, retrieval, models, research, generated-code containers,
-image generation, backup/restore, and the later release gates remain
-unimplemented. Chat controls are visibly disabled until retrieval and the local
-model runtime exist; retained-data operations remain disabled while the vault
-is unavailable.
+retrieval indexes, models, research, generated-code containers, image
+generation, backup/restore, and the later release gates remain unimplemented.
+Chat controls are visibly disabled until retrieval and the local model runtime
+exist; retained-data operations remain disabled while the vault is unavailable.
 
 ## Development
 

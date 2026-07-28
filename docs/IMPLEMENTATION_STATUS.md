@@ -25,8 +25,9 @@ This file is the acceptance ledger for the Pinky implementation specification.
 
 - [x] Approved-path local UTF-8 text ingestion, encrypted retention, versioning, and chunk metadata
 - [x] Cross-source object deduplication and symlink-escape rejection
+- [x] Stable-change local-file watching, automatic re-versioning, and missing-file state
 - [ ] PDF, office, image/OCR, and isolated-worker extractors
-- [ ] Filesystem watching, Tantivy, Qdrant, and citation viewer
+- [ ] Tantivy, Qdrant, and citation viewer
 - [ ] Model onboarding, hybrid retrieval, cited chat, claims, and dossiers
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
 - [ ] Workspace snapshots, permissions, Podman tools, and app generation
@@ -58,6 +59,15 @@ code, JSON, YAML, XML, HTML, and CSV are normalized for line endings, retained,
 and chunked at 500 approximate tokens with 75-token overlap. Metadata changes
 atomically create a new source version and move the current-version pointer;
 unsupported binaries are still archived and visibly marked unsupported.
+
+The desktop starts a supervised local watcher after vault creation or unlock.
+Each retained version records device, inode, size, and nanosecond modification
+time. Changed files must hold the same size and modification time through two
+checks at least 500 ms apart and a 750 ms debounce window before re-ingestion.
+Failed or cancelled replacements leave the previous current version active and
+retry after a bounded cooldown. Deletions mark the source `missing` while
+retaining its current version and archived objects; reappearance schedules a
+new version after the same stability checks.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and
