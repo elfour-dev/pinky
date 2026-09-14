@@ -34,6 +34,7 @@ This file is the acceptance ledger for the Pinky implementation specification.
   SSH-tunnel acceptance
 - [x] Provider-neutral bounded and cancellable Ollama structured generation
   transport
+- [x] Strict versioned evidence and cited-answer validation contract
 - [ ] Embedding model integration and end-to-end Qdrant vector indexing
 - [ ] Model onboarding, hybrid retrieval, cited chat, claims, and dossiers
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
@@ -102,25 +103,21 @@ chunks per source version. This is a tested runtime contract, not yet a user
 feature: the signed embedding model and Qdrant executable still need onboarding
 before real vector indexing can begin.
 
-The initial local-model boundary accepts only an explicit
+The llama.cpp compatibility boundary accepts only an explicit
 `http://127.0.0.1:<port>` llama-server origin, requires a 256-bit hexadecimal
 bearer token, bypasses ambient proxies, redacts the token from diagnostics, and
 validates a bounded, cancellable health request. A deterministic loopback test
-verifies the request path and authorization header. This is the Q1A transport
-contract only. The upstream health route is public, so authentication must also
-be proven against a protected endpoint before questions are enabled. Desktop
-configuration, server supervision, model identity, generation, and answer
-validation remain gated follow-up phases documented in
-`docs/CITED_QA_PHASES.md`.
+verifies the request path and authorization header. The upstream health route
+is public, so authentication is also proven against a protected endpoint.
 
 The desktop now exposes the attach portion of Q1B after vault unlock. It accepts
 an ephemeral endpoint and token, checks the public health route, proves the
 token against the protected `/props` route, validates a non-empty model path,
 at least one slot, and at least 2,048 context tokens, then shows the attached
 model and context size. Detaching or losing the verified vault drops the client
-and zeroizes its in-memory token. Supervised executable launch, target-host
-model smoke testing, and cited generation remain incomplete, so Q1B is not yet
-accepted.
+and zeroizes its in-memory token. Supervised executable launch, shutdown
+acceptance, and generation through this compatibility provider remain deferred;
+the Ollama-first delivery route is unaffected.
 
 The Ollama-first runtime path is accepted independently of managed
 `llama-server`. Pinky accepts no-key Ollama only through an exact IPv4-loopback
@@ -140,6 +137,17 @@ model identity and remote/cloud metadata are validated before returning
 untrusted content. A fixed non-sensitive structured-output test passed through
 the target-host tunnel against `qwen3.5:9b`; generated text is not yet displayed
 or persisted.
+
+R3 adds the non-displayable trust boundary between retrieval and the future
+question UI. It selects no more than 12 current-version passages and 8,000
+approximate context tokens, deduplicates chunks, caps each source version at
+three passages, and regenerates citation identifiers from trusted source,
+version, and chunk coordinates. Evidence is serialized inside a task-specific
+untrusted-data delimiter. Model output must match a bounded, versioned JSON
+contract; every summary and claim citation must be one of the supplied IDs,
+inferences must be explicit, and malformed or unsupported output receives at
+most one bounded repair attempt. Empty retrieval returns an explicit uncited
+gap without calling the model. No answer is displayed or persisted in R3.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and

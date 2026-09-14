@@ -13,6 +13,7 @@ pub mod object_store;
 pub mod ollama;
 pub mod onboarding;
 pub mod process;
+pub mod qa;
 pub mod qdrant;
 pub mod recovery;
 pub mod retrieval;
@@ -44,6 +45,11 @@ pub use onboarding::{
     VaultPaths, VaultPlatform, VaultRegistration,
 };
 pub use process::{ProcessError, ProcessOutcome, ProcessSupervisor, ProcessTermination};
+pub use qa::{
+    answer_question, select_evidence, validate_answer, AnswerClaimV1, AnswerEnvelopeV1,
+    ClaimSupportV1, EvidenceV1, QaError, QuestionLimitsV1, QuestionRequestV1, MAX_ANSWER_CLAIMS,
+    MAX_CHUNKS_PER_EVIDENCE_VERSION, MAX_EVIDENCE_CHUNKS, MAX_EVIDENCE_TOKENS, QA_SCHEMA_VERSION,
+};
 pub use qdrant::{
     QdrantClient, QdrantError, QdrantLaunchConfig, QdrantSidecar, VectorMatch, VectorPoint,
 };

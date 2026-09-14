@@ -148,7 +148,7 @@ R2 gate:
 
 ## R3 — evidence and answer contract
 
-Status: specified, not implemented.
+Status: complete.
 
 Contract: retrieval occurs first; Pinky accepts only a structured answer whose
 claims map to evidence supplied for that exact request.
@@ -169,6 +169,7 @@ claims map to evidence supplied for that exact request.
 `AnswerEnvelopeV1` contains only:
 
 - `summary`: a concise direct response;
+- `summary_citations`: supplied evidence IDs supporting the direct response;
 - `claims`: ordered `statement`, `support`, and `citations` objects;
 - `warnings`: stale, disputed, or single-source qualifications; and
 - `unresolved_gaps`: matters the supplied evidence could not answer.
@@ -180,23 +181,24 @@ citations, and unbounded strings or arrays are rejected.
 
 ### Retrieval and prompt assembly
 
-- [ ] Retrieve only current versions through the existing lexical index
-- [ ] Deduplicate chunks and cap each source version at three chunks
-- [ ] Select at most 12 chunks and 8,000 approximate context tokens
-- [ ] Preserve contradictory passages
-- [ ] Delimit evidence as untrusted quoted material
-- [ ] Supply only Pinky-generated citation IDs
-- [ ] Validate output independently of Ollama's schema enforcement
-- [ ] Permit at most one bounded repair request
-- [ ] Return an evidence gap without inference when retrieval is empty
+- [x] Retrieve only current versions through the existing lexical index
+- [x] Deduplicate chunks and cap each source version at three chunks
+- [x] Select at most 12 chunks and 8,000 approximate context tokens
+- [x] Preserve contradictory passages
+- [x] Delimit evidence as untrusted quoted material
+- [x] Supply only Pinky-generated citation IDs
+- [x] Validate output independently of Ollama's schema enforcement
+- [x] Permit at most one bounded repair request
+- [x] Return an evidence gap without inference when retrieval is empty
 
 R3 gate:
 
-- Property and fixture tests cover supported answers, empty retrieval,
+- [x] Property and fixture tests cover supported answers, empty retrieval,
   contradictions, inference, stale citations, malformed JSON, unknown fields,
   source prompt injection, invented citations, oversized output, and failed
   repair.
-- Invalid output must never become a displayable answer.
+- [x] Invalid output cannot cross the R3 validation boundary as a displayable
+  answer.
 
 ## R4 — visible one-shot cited answers
 
