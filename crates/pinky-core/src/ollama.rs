@@ -6,10 +6,16 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::MIN_CHAT_CONTEXT;
+use crate::{
+    InferenceError, InferenceFuture, InferenceMetrics, InferenceProvider, InferenceResponse,
+    StructuredGenerationRequest, MAX_INFERENCE_REQUEST_BYTES, MAX_INFERENCE_RESPONSE_BYTES,
+    MIN_CHAT_CONTEXT,
+};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const INFERENCE_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_ERROR_BODY_CHARS: usize = 500;
+const KEEP_ALIVE: &str = "5m";
 
 #[derive(Debug, Error)]
 pub enum OllamaError {
@@ -48,6 +54,7 @@ pub struct OllamaClient {
     client: Client,
     base_url: Url,
     model_name: String,
+    inference_timeout: Duration,
 }
 
 impl fmt::Debug for OllamaClient {
@@ -78,6 +85,7 @@ impl OllamaClient {
             client,
             base_url,
             model_name: model_name.to_owned(),
+            inference_timeout: INFERENCE_TIMEOUT,
         })
     }
 
@@ -183,6 +191,103 @@ impl OllamaClient {
             .timeout(PROBE_TIMEOUT);
         read_json(request, response_name, cancellation).await
     }
+
+    async fn generate_structured_inner(
+        &self,
+        request: &StructuredGenerationRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<InferenceResponse, InferenceError> {
+        request.validate()?;
+        let body = serde_json::to_vec(&ChatRequest {
+            model: &self.model_name,
+            messages: [
+                ChatMessageRequest {
+                    role: "system",
+                    content: &request.system,
+                },
+                ChatMessageRequest {
+                    role: "user",
+                    content: &request.prompt,
+                },
+            ],
+            format: &request.output_schema,
+            stream: false,
+            think: false,
+            keep_alive: KEEP_ALIVE,
+            options: ChatOptions {
+                temperature: 0.0,
+                num_predict: request.max_output_tokens,
+            },
+        })
+        .map_err(|_| InferenceError::InvalidRequest("request is not serializable"))?;
+        if body.len() > MAX_INFERENCE_REQUEST_BYTES {
+            return Err(InferenceError::InvalidRequest(
+                "serialized request exceeds size limit",
+            ));
+        }
+        let request = self
+            .client
+            .post(
+                self.base_url
+                    .join("api/chat")
+                    .map_err(|_| InferenceError::InvalidRequest("invalid provider endpoint"))?,
+            )
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .timeout(self.inference_timeout);
+
+        let response = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(InferenceError::Cancelled),
+            response = request.send() => response.map_err(map_inference_request_error)?,
+        };
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = read_bounded_error(response, cancellation).await?;
+            return Err(InferenceError::Rejected { status, body });
+        }
+        let body = read_bounded_inference_body(response, cancellation).await?;
+        let response: ChatResponse =
+            serde_json::from_slice(&body).map_err(|_| InferenceError::MalformedResponse)?;
+        if response.remote_model.as_deref().is_some_and(not_empty)
+            || response.remote_host.as_deref().is_some_and(not_empty)
+        {
+            return Err(InferenceError::RemoteResponse);
+        }
+        if response.model != self.model_name {
+            return Err(InferenceError::ModelMismatch {
+                expected: self.model_name.clone(),
+                found: response.model,
+            });
+        }
+        if !response.done {
+            return Err(InferenceError::IncompleteResponse);
+        }
+        if response.message.role != "assistant" || response.message.content.trim().is_empty() {
+            return Err(InferenceError::MalformedResponse);
+        }
+        Ok(InferenceResponse {
+            model: self.model_name.clone(),
+            content: response.message.content,
+            done_reason: response.done_reason,
+            metrics: InferenceMetrics {
+                total_duration_ns: response.total_duration,
+                load_duration_ns: response.load_duration,
+                prompt_tokens: response.prompt_eval_count,
+                output_tokens: response.eval_count,
+            },
+        })
+    }
+}
+
+impl InferenceProvider for OllamaClient {
+    fn generate_structured<'a>(
+        &'a self,
+        request: &'a StructuredGenerationRequest,
+        cancellation: &'a CancellationToken,
+    ) -> InferenceFuture<'a> {
+        Box::pin(self.generate_structured_inner(request, cancellation))
+    }
 }
 
 #[derive(Deserialize)]
@@ -225,6 +330,49 @@ struct ModelDetails {
     context_length: Option<u64>,
 }
 
+#[derive(Serialize)]
+struct ChatRequest<'a> {
+    model: &'a str,
+    messages: [ChatMessageRequest<'a>; 2],
+    format: &'a Value,
+    stream: bool,
+    think: bool,
+    keep_alive: &'static str,
+    options: ChatOptions,
+}
+
+#[derive(Serialize)]
+struct ChatMessageRequest<'a> {
+    role: &'static str,
+    content: &'a str,
+}
+
+#[derive(Serialize)]
+struct ChatOptions {
+    temperature: f32,
+    num_predict: u32,
+}
+
+#[derive(Deserialize)]
+struct ChatResponse {
+    model: String,
+    message: ChatMessageResponse,
+    done: bool,
+    done_reason: Option<String>,
+    remote_model: Option<String>,
+    remote_host: Option<String>,
+    total_duration: Option<u64>,
+    load_duration: Option<u64>,
+    prompt_eval_count: Option<u64>,
+    eval_count: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ChatMessageResponse {
+    role: String,
+    content: String,
+}
+
 async fn read_json<T: for<'de> Deserialize<'de>>(
     request: reqwest::RequestBuilder,
     response_name: &'static str,
@@ -247,6 +395,66 @@ async fn read_json<T: for<'de> Deserialize<'de>>(
         .json::<T>()
         .await
         .map_err(|_| OllamaError::InvalidResponse(response_name))
+}
+
+async fn read_bounded_inference_body(
+    mut response: reqwest::Response,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, InferenceError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_INFERENCE_RESPONSE_BYTES as u64)
+    {
+        return Err(InferenceError::ResponseTooLarge {
+            limit: MAX_INFERENCE_RESPONSE_BYTES,
+        });
+    }
+    let mut body = Vec::new();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(InferenceError::Cancelled),
+            chunk = response.chunk() => chunk.map_err(map_inference_request_error)?,
+        };
+        let Some(chunk) = chunk else {
+            return Ok(body);
+        };
+        if body.len().saturating_add(chunk.len()) > MAX_INFERENCE_RESPONSE_BYTES {
+            return Err(InferenceError::ResponseTooLarge {
+                limit: MAX_INFERENCE_RESPONSE_BYTES,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+}
+
+async fn read_bounded_error(
+    mut response: reqwest::Response,
+    cancellation: &CancellationToken,
+) -> Result<String, InferenceError> {
+    let mut body = Vec::new();
+    let byte_limit = MAX_ERROR_BODY_CHARS * 4;
+    while body.len() < byte_limit {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(InferenceError::Cancelled),
+            chunk = response.chunk() => chunk.map_err(map_inference_request_error)?,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let remaining = byte_limit - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    Ok(bounded(&String::from_utf8_lossy(&body)))
+}
+
+fn map_inference_request_error(error: reqwest::Error) -> InferenceError {
+    if error.is_timeout() {
+        InferenceError::Timeout
+    } else {
+        InferenceError::Unavailable(error.to_string())
+    }
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<Url, OllamaError> {
@@ -278,8 +486,11 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        sync::mpsc,
         thread,
     };
+
+    use serde_json::json;
 
     use super::*;
 
@@ -417,6 +628,268 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn sends_a_bounded_structured_chat_request_without_authentication() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (request, stream) = accept_http_request(&listener);
+            assert!(request.starts_with("POST /api/chat HTTP/1.1\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            let body: Value = serde_json::from_str(http_body(&request)).unwrap();
+            assert_eq!(body["model"], "qwen3:8b");
+            assert_eq!(body["stream"], false);
+            assert_eq!(body["think"], false);
+            assert_eq!(body["keep_alive"], "5m");
+            assert_eq!(body["options"]["temperature"], 0.0);
+            assert_eq!(body["options"]["num_predict"], 512);
+            assert_eq!(body["messages"][0]["role"], "system");
+            assert_eq!(body["messages"][1]["role"], "user");
+            assert_eq!(body["format"]["type"], "object");
+            write_http_response(
+                stream,
+                "200 OK",
+                r#"{"model":"qwen3:8b","message":{"role":"assistant","content":"{\"answer\":\"grounded\"}"},"done":true,"done_reason":"stop","total_duration":42,"load_duration":5,"prompt_eval_count":12,"eval_count":7}"#,
+            )
+            .unwrap();
+        });
+
+        let client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "qwen3:8b").unwrap();
+        let response = client
+            .generate_structured(&inference_request(), &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(response.content, r#"{"answer":"grounded"}"#);
+        assert_eq!(response.metrics.prompt_tokens, Some(12));
+        assert_eq!(response.metrics.output_tokens, Some(7));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn classifies_rejection_malformed_incomplete_mismatch_and_remote_responses() {
+        let cases = [
+            (
+                "404 Not Found",
+                r#"{"error":"model disappeared"}"#,
+                "rejected",
+            ),
+            ("200 OK", "not-json", "malformed"),
+            (
+                "200 OK",
+                r#"{"model":"qwen3:8b","message":{"role":"assistant","content":"{}"},"done":false}"#,
+                "incomplete",
+            ),
+            (
+                "200 OK",
+                r#"{"model":"other:latest","message":{"role":"assistant","content":"{}"},"done":true}"#,
+                "mismatch",
+            ),
+            (
+                "200 OK",
+                r#"{"model":"qwen3:8b","message":{"role":"assistant","content":"{}"},"done":true,"remote_host":"https://ollama.com"}"#,
+                "remote",
+            ),
+        ];
+        for (status, body, expected) in cases {
+            let result = generate_with_response(status, body).await;
+            assert!(
+                matches!(
+                    (&result, expected),
+                    (Err(InferenceError::Rejected { .. }), "rejected")
+                        | (Err(InferenceError::MalformedResponse), "malformed")
+                        | (Err(InferenceError::IncompleteResponse), "incomplete")
+                        | (Err(InferenceError::ModelMismatch { .. }), "mismatch")
+                        | (Err(InferenceError::RemoteResponse), "remote")
+                ),
+                "unexpected result for {expected}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_response_from_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (_request, mut stream) = accept_http_request(&listener);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_INFERENCE_RESPONSE_BYTES + 1
+            )
+            .unwrap();
+        });
+        let client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "qwen3:8b").unwrap();
+        assert!(matches!(
+            client
+                .generate_structured(&inference_request(), &CancellationToken::new())
+                .await,
+            Err(InferenceError::ResponseTooLarge { .. })
+        ));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_response_without_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (_request, mut stream) = accept_http_request(&listener);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            let oversized = vec![b'x'; MAX_INFERENCE_RESPONSE_BYTES + 1];
+            let _ = stream.write_all(&oversized);
+        });
+        let client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "qwen3:8b").unwrap();
+        assert!(matches!(
+            client
+                .generate_structured(&inference_request(), &CancellationToken::new())
+                .await,
+            Err(InferenceError::ResponseTooLarge { .. })
+        ));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounds_serialized_requests_and_rejected_error_bodies() {
+        let client = OllamaClient::connect("http://127.0.0.1:9", "qwen3:8b").unwrap();
+        let mut oversized = inference_request();
+        oversized.prompt = "\0".repeat(crate::MAX_PROMPT_BYTES);
+        assert!(matches!(
+            client
+                .generate_structured(&oversized, &CancellationToken::new())
+                .await,
+            Err(InferenceError::InvalidRequest(
+                "serialized request exceeds size limit"
+            ))
+        ));
+
+        let long_error = "x".repeat(MAX_ERROR_BODY_CHARS * 10);
+        let result = generate_with_owned_response("500 Internal Server Error", long_error).await;
+        let Err(InferenceError::Rejected { body, .. }) = result else {
+            panic!("expected bounded rejection");
+        };
+        assert_eq!(body.chars().count(), MAX_ERROR_BODY_CHARS);
+    }
+
+    #[tokio::test]
+    async fn cancellation_discards_a_late_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_sender, accepted_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (_request, stream) = accept_http_request(&listener);
+            accepted_sender.send(()).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            let _ = write_http_response(
+                stream,
+                "200 OK",
+                r#"{"model":"qwen3:8b","message":{"role":"assistant","content":"{}"},"done":true}"#,
+            );
+        });
+        let client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "qwen3:8b").unwrap();
+        let cancellation = CancellationToken::new();
+        let cancellation_signal = cancellation.clone();
+        let cancel = thread::spawn(move || {
+            accepted_receiver.recv().unwrap();
+            cancellation_signal.cancel();
+        });
+        assert!(matches!(
+            client
+                .generate_structured(&inference_request(), &cancellation)
+                .await,
+            Err(InferenceError::Cancelled)
+        ));
+        cancel.join().unwrap();
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn classifies_timeout_and_unavailable_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let _accepted = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+        let mut client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "qwen3:8b").unwrap();
+        client.inference_timeout = Duration::from_millis(20);
+        assert!(matches!(
+            client
+                .generate_structured(&inference_request(), &CancellationToken::new())
+                .await,
+            Err(InferenceError::Timeout)
+        ));
+        server.join().unwrap();
+
+        let unavailable = OllamaClient::connect("http://127.0.0.1:9", "qwen3:8b").unwrap();
+        assert!(matches!(
+            unavailable
+                .generate_structured(&inference_request(), &CancellationToken::new())
+                .await,
+            Err(InferenceError::Unavailable(_))
+        ));
+    }
+
+    fn inference_request() -> StructuredGenerationRequest {
+        StructuredGenerationRequest {
+            system: "Use only supplied evidence.".into(),
+            prompt: "Question with evidence".into(),
+            output_schema: json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"]
+            }),
+            max_output_tokens: 512,
+        }
+    }
+
+    async fn generate_with_response(
+        status: &'static str,
+        body: &'static str,
+    ) -> Result<InferenceResponse, InferenceError> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (_request, stream) = accept_http_request(&listener);
+            write_http_response(stream, status, body).unwrap();
+        });
+        let client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "qwen3:8b").unwrap();
+        let result = client
+            .generate_structured(&inference_request(), &CancellationToken::new())
+            .await;
+        server.join().unwrap();
+        result
+    }
+
+    async fn generate_with_owned_response(
+        status: &'static str,
+        body: String,
+    ) -> Result<InferenceResponse, InferenceError> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (_request, stream) = accept_http_request(&listener);
+            write_http_response(stream, status, &body).unwrap();
+        });
+        let client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "qwen3:8b").unwrap();
+        let result = client
+            .generate_structured(&inference_request(), &CancellationToken::new())
+            .await;
+        server.join().unwrap();
+        result
+    }
+
     async fn probe_with_details(details: &'static str) -> Result<OllamaRuntimeInfo, OllamaError> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -454,5 +927,51 @@ mod tests {
             body.len()
         )
         .unwrap();
+    }
+
+    fn accept_http_request(listener: &TcpListener) -> (String, std::net::TcpStream) {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let length = stream.read(&mut buffer).unwrap();
+            if length == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..length]);
+            let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(str::trim)
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        (String::from_utf8(request).unwrap(), stream)
+    }
+
+    fn http_body(request: &str) -> &str {
+        request.split_once("\r\n\r\n").unwrap().1
+    }
+
+    fn write_http_response(
+        mut stream: std::net::TcpStream,
+        status: &str,
+        body: &str,
+    ) -> std::io::Result<()> {
+        write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
     }
 }

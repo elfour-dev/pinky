@@ -78,33 +78,37 @@ typed update and moving the desktop test module after runtime items.
 
 - `cargo fmt --all --check`: passed
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed
-- `cargo test --workspace`: 63 core and 6 desktop tests passed
-- opt-in live Ollama target-host test: passed separately
+- `cargo test --workspace`: 71 core and 6 desktop tests passed
+- two opt-in live Ollama target-host tests: passed separately
 - opt-in live Secret Service/FUSE and Ollama tests: ignored in the ordinary
   regression suite as designed
 - `npm test`: 3 frontend tests passed
-- `npm run build`: passed with the existing Vite chunk-size warning
+- `npm run build`: passed without warnings after deterministic vendor chunking
+- `npm run test:e2e`: passed
 - `git diff --check`: passed
 
 The deterministic fake llama-server test needs loopback permission; the
 restricted filesystem sandbox returned `EPERM`, and the same suite passed when
 run with explicit local-loopback permission.
 
-## Next implementation slice: R2 Ollama generation transport
+## Next implementation slice: R3 evidence and answer contract
 
 The user has connected Pinky to an Ollama model through the explicit attach
-path. Follow `CITED_QA_PHASES.md` and implement R2 next:
+path. R2 is complete: the provider-neutral transport sends bounded,
+cancellable structured-output requests, rejects remote or mismatched models,
+and passed its real-model schema smoke test. Follow `CITED_QA_PHASES.md` and
+implement R3 next:
 
-1. Add the provider-neutral inference boundary.
-2. Implement bounded, cancellable Ollama `/api/chat` structured output.
-3. Reject response model mismatches and remote/cloud metadata.
-4. Cover the protocol and every defined failure with a deterministic fake
-   Ollama server.
-5. Run a non-sensitive target-host schema smoke test.
+1. Define `QuestionRequestV1` and `AnswerEnvelopeV1` with strict limits.
+2. Select bounded current-version lexical evidence.
+3. Delimit evidence as untrusted and generate only Pinky-owned citation IDs.
+4. Validate every returned claim and citation independently of Ollama.
+5. Cover gaps, contradictions, injection, malformed output, and one bounded
+   repair attempt with deterministic fixtures.
 
-Do not display or persist generated text during R2. Supervised llama-server
-launch remains a parallel compatibility track and no longer blocks the
-Ollama-first Pinky Lite route. Do not download a model or executable implicitly.
+Do not display or persist generated text during R3. Supervised llama-server
+launch remains a parallel compatibility track and does not block the
+Ollama-first Pinky Lite route.
 
 ## Orientation commands
 

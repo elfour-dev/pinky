@@ -114,7 +114,7 @@ R1 gate:
 
 ## R2 — cancellable Ollama generation transport
 
-Status: next implementation phase.
+Status: complete.
 
 Contract: Pinky submits a bounded structured-output request to the attached
 Ollama model and returns an untrusted response to the validator. Generated text
@@ -124,27 +124,27 @@ Ollama's documented [`/api/chat`](https://docs.ollama.com/api/chat) request
 accepts a JSON Schema in `format`; Pinky still validates the returned content
 itself because runtime schema enforcement does not make model output trusted.
 
-- [ ] Add a provider-neutral inference trait
-- [ ] Implement Ollama `POST /api/chat` with `stream: false` for the initial
+- [x] Add a provider-neutral inference trait
+- [x] Implement Ollama `POST /api/chat` with `stream: false` for the initial
   structured-output slice
-- [ ] Supply a JSON Schema in `format`, deterministic generation options, and
+- [x] Supply a JSON Schema in `format`, deterministic generation options, and
   an explicit bounded `keep_alive`
-- [ ] Verify the response model and reject remote/cloud response metadata
-- [ ] Bound request size, response size, connection time, inference time, and
+- [x] Verify the response model and reject remote/cloud response metadata
+- [x] Bound request size, response size, connection time, inference time, and
   retained error bodies
-- [ ] Support cooperative cancellation and discard late responses
-- [ ] Return timing and token counts without logging request or response bodies
+- [x] Support cooperative cancellation and discard late responses
+- [x] Return timing and token counts without logging request or response bodies
   outside the vault
-- [ ] Distinguish unavailable server, missing model, timeout, cancellation,
+- [x] Distinguish unavailable server, missing model, timeout, cancellation,
   malformed response, and remote response errors
 
 R2 gate:
 
-- Fake-Ollama tests cover exact request shape, schema, absence of authorization
+- [x] Fake-Ollama tests cover exact request shape, schema, absence of authorization
   and proxy use, success, defined errors, cancellation, late responses, and
   size limits.
-- A target-host smoke test submits a non-sensitive fixed prompt and validates a
-  schema-conforming response.
+- [x] On 2026-09-14, the target-host smoke test submitted a non-sensitive fixed
+  schema through the SSH tunnel to `qwen3.5:9b` and validated the response.
 
 ## R3 — evidence and answer contract
 

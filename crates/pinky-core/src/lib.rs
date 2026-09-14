@@ -6,6 +6,7 @@
 
 pub mod database;
 pub mod hybrid;
+pub mod inference;
 pub mod ingestion;
 pub mod llama;
 pub mod object_store;
@@ -22,6 +23,11 @@ pub mod vault;
 pub use database::{Database, DatabaseError};
 pub use hybrid::{
     reciprocal_rank_fusion, FusedChunk, RankedChunk, MAX_CHUNKS_PER_SOURCE_VERSION, RRF_K,
+};
+pub use inference::{
+    InferenceError, InferenceFuture, InferenceMetrics, InferenceProvider, InferenceResponse,
+    StructuredGenerationRequest, MAX_INFERENCE_REQUEST_BYTES, MAX_INFERENCE_RESPONSE_BYTES,
+    MAX_OUTPUT_TOKENS, MAX_PROMPT_BYTES, MAX_SCHEMA_BYTES, MAX_SYSTEM_BYTES,
 };
 pub use ingestion::{
     IngestedSource, IngestionError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget,

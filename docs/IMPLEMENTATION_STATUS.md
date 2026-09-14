@@ -32,6 +32,8 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Strict token-bearing loopback llama-server health client contract
 - [x] Explicit no-key loopback Ollama attach, local-model validation, and live
   SSH-tunnel acceptance
+- [x] Provider-neutral bounded and cancellable Ollama structured generation
+  transport
 - [ ] Embedding model integration and end-to-end Qdrant vector indexing
 - [ ] Model onboarding, hybrid retrieval, cited chat, claims, and dossiers
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
@@ -128,6 +130,16 @@ cover the vault and attachment lifecycle. The opt-in target-host test passed on
 2026-09-14 through the user's SSH tunnel at `127.0.0.1:11435`, probing Ollama
 0.33.2 and `qwen3.5:9b` with 262,144 advertised context tokens. No generation
 request was made during this phase.
+
+The R2 generation transport posts non-streaming `/api/chat` requests with an
+explicit JSON Schema, zero temperature, disabled thinking, bounded output
+tokens, and a five-minute keep-alive. It bounds both serialized request bytes
+and response bytes even when `Content-Length` is absent, distinguishes
+transport failures, and discards late responses after cancellation. Response
+model identity and remote/cloud metadata are validated before returning
+untrusted content. A fixed non-sensitive structured-output test passed through
+the target-host tunnel against `qwen3.5:9b`; generated text is not yet displayed
+or persisted.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and
