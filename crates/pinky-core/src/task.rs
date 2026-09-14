@@ -114,12 +114,14 @@ impl TaskContext {
     ) {
         self.manager.transition(
             self.id,
-            TaskState::Running,
-            name,
-            progress,
-            activity,
-            self.cancellable,
-            None,
+            EventUpdate::new(
+                TaskState::Running,
+                name,
+                progress,
+                activity,
+                self.cancellable,
+                None,
+            ),
         );
     }
 
@@ -144,6 +146,35 @@ struct Inner {
     tasks: HashMap<Uuid, TaskControl>,
     journal: Option<TaskJournal>,
     journal_error: Option<String>,
+}
+
+struct EventUpdate {
+    state: TaskState,
+    phase: TaskPhase,
+    cancellable: bool,
+    error: Option<StructuredError>,
+}
+
+impl EventUpdate {
+    fn new(
+        state: TaskState,
+        name: impl Into<String>,
+        progress: Option<f32>,
+        activity: impl Into<String>,
+        cancellable: bool,
+        error: Option<StructuredError>,
+    ) -> Self {
+        Self {
+            state,
+            phase: TaskPhase {
+                name: name.into(),
+                progress: progress.map(|value| value.clamp(0.0, 1.0)),
+                activity: activity.into(),
+            },
+            cancellable,
+            error,
+        }
+    }
 }
 
 impl Default for TaskManager {
@@ -220,71 +251,76 @@ impl TaskManager {
         let queued = self.make_event(
             id,
             parent_id,
-            TaskState::Queued,
-            &kind,
-            Some(0.0),
-            "Queued",
-            cancellable,
-            None,
+            EventUpdate::new(
+                TaskState::Queued,
+                &kind,
+                Some(0.0),
+                "Queued",
+                cancellable,
+                None,
+            ),
         );
         let handle = tokio::spawn(async move {
             let _ = start_rx.await;
             if !cancellation.is_cancelled() {
                 manager.transition(
                     id,
-                    TaskState::Running,
-                    kind.clone(),
-                    Some(0.0),
-                    "Started",
-                    cancellable,
-                    None,
+                    EventUpdate::new(
+                        TaskState::Running,
+                        kind.clone(),
+                        Some(0.0),
+                        "Started",
+                        cancellable,
+                        None,
+                    ),
                 );
             }
             let result = work(context).await;
             match (cancellation.is_cancelled(), result) {
                 (true, Err(message)) if message != "cancelled" => manager.transition(
                     id,
-                    TaskState::Failed,
-                    kind,
-                    None,
-                    "Cancellation failed",
-                    false,
-                    Some(StructuredError {
-                        code: "cancellation_failed".into(),
-                        message,
-                        recoverable: false,
-                    }),
+                    EventUpdate::new(
+                        TaskState::Failed,
+                        kind,
+                        None,
+                        "Cancellation failed",
+                        false,
+                        Some(StructuredError {
+                            code: "cancellation_failed".into(),
+                            message,
+                            recoverable: false,
+                        }),
+                    ),
                 ),
                 (true, _) => manager.transition(
                     id,
-                    TaskState::Cancelled,
-                    kind,
-                    None,
-                    "Cancelled",
-                    false,
-                    None,
+                    EventUpdate::new(TaskState::Cancelled, kind, None, "Cancelled", false, None),
                 ),
                 (false, Err(message)) => manager.transition(
                     id,
-                    TaskState::Failed,
-                    kind,
-                    None,
-                    "Failed",
-                    false,
-                    Some(StructuredError {
-                        code: "worker_failed".into(),
-                        message,
-                        recoverable: true,
-                    }),
+                    EventUpdate::new(
+                        TaskState::Failed,
+                        kind,
+                        None,
+                        "Failed",
+                        false,
+                        Some(StructuredError {
+                            code: "worker_failed".into(),
+                            message,
+                            recoverable: true,
+                        }),
+                    ),
                 ),
                 (false, Ok(())) => manager.transition(
                     id,
-                    TaskState::Completed,
-                    kind,
-                    Some(1.0),
-                    "Completed",
-                    false,
-                    None,
+                    EventUpdate::new(
+                        TaskState::Completed,
+                        kind,
+                        Some(1.0),
+                        "Completed",
+                        false,
+                        None,
+                    ),
                 ),
             }
         });
@@ -316,12 +352,14 @@ impl TaskManager {
         };
         self.transition(
             id,
-            TaskState::Cancelling,
-            "cancellation",
-            None,
-            "Stopping work",
-            false,
-            None,
+            EventUpdate::new(
+                TaskState::Cancelling,
+                "cancellation",
+                None,
+                "Stopping work",
+                false,
+                None,
+            ),
         );
         token.cancel();
         true
@@ -343,12 +381,14 @@ impl TaskManager {
         };
         self.transition(
             id,
-            TaskState::Running,
-            last.phase.name,
-            last.phase.progress,
-            if paused { "Paused" } else { "Resuming" },
-            true,
-            None,
+            EventUpdate::new(
+                TaskState::Running,
+                last.phase.name,
+                last.phase.progress,
+                if paused { "Paused" } else { "Resuming" },
+                true,
+                None,
+            ),
         );
         true
     }
@@ -408,18 +448,20 @@ impl TaskManager {
             recovered.push(event.task_id);
             self.transition(
                 event.task_id,
-                TaskState::FailedInterrupted,
-                event.phase.name,
-                event.phase.progress,
-                "Interrupted by application restart",
-                false,
-                Some(StructuredError {
-                    code: "failed_interrupted".into(),
-                    message:
-                        "The application stopped before this task reached a durable terminal state"
-                            .into(),
-                    recoverable: true,
-                }),
+                EventUpdate::new(
+                    TaskState::FailedInterrupted,
+                    event.phase.name,
+                    event.phase.progress,
+                    "Interrupted by application restart",
+                    false,
+                    Some(StructuredError {
+                        code: "failed_interrupted".into(),
+                        message:
+                            "The application stopped before this task reached a durable terminal state"
+                                .into(),
+                        recoverable: true,
+                    }),
+                ),
             );
         }
         Ok(recovered)
@@ -439,16 +481,7 @@ impl TaskManager {
             .collect()
     }
 
-    fn transition(
-        &self,
-        id: Uuid,
-        state: TaskState,
-        name: impl Into<String>,
-        progress: Option<f32>,
-        activity: impl Into<String>,
-        cancellable: bool,
-        error: Option<StructuredError>,
-    ) {
+    fn transition(&self, id: Uuid, update: EventUpdate) {
         let parent_id = self
             .inner
             .lock()
@@ -456,16 +489,7 @@ impl TaskManager {
             .tasks
             .get(&id)
             .and_then(|control| control.last.parent_id);
-        let event = self.make_event(
-            id,
-            parent_id,
-            state,
-            name,
-            progress,
-            activity,
-            cancellable,
-            error,
-        );
+        let event = self.make_event(id, parent_id, update);
         if let Some(control) = self.inner.lock().unwrap().tasks.get_mut(&id) {
             control.last = event.clone();
         }
@@ -482,17 +506,7 @@ impl TaskManager {
         let _ = self.events.send(event);
     }
 
-    fn make_event(
-        &self,
-        task_id: Uuid,
-        parent_id: Option<Uuid>,
-        state: TaskState,
-        name: impl Into<String>,
-        progress: Option<f32>,
-        activity: impl Into<String>,
-        cancellable: bool,
-        error: Option<StructuredError>,
-    ) -> TaskEvent {
+    fn make_event(&self, task_id: Uuid, parent_id: Option<Uuid>, update: EventUpdate) -> TaskEvent {
         let sequence = {
             let mut inner = self.inner.lock().unwrap();
             inner.sequence += 1;
@@ -505,18 +519,14 @@ impl TaskManager {
             task_id,
             parent_id,
             timestamp: Utc::now(),
-            state,
-            phase: TaskPhase {
-                name: name.into(),
-                progress: progress.map(|value| value.clamp(0.0, 1.0)),
-                activity: activity.into(),
-            },
+            state: update.state,
+            phase: update.phase,
             tool_name: None,
             resource_uri: None,
             permission_state: "approved".into(),
             budget_state: "within_budget".into(),
-            cancellable,
-            error,
+            cancellable: update.cancellable,
+            error: update.error,
         }
     }
 }

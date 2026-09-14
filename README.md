@@ -8,6 +8,7 @@ Planning and resumption documents:
 
 - [Vault setup and usage guide](docs/VAULT_GUIDE.md)
 - [Hands-on vault tutorial and example sources](docs/VAULT_TUTORIAL.md)
+- [Cited local Q&A delivery phases](docs/CITED_QA_PHASES.md)
 - [Offline self-development strategy](docs/OFFLINE_SELF_DEVELOPMENT.md)
 - [Next-session handoff](docs/NEXT_SESSION.md)
 - [Implementation acceptance ledger](docs/IMPLEMENTATION_STATUS.md)
@@ -54,6 +55,23 @@ Core also contains the next retrieval foundation: a supervised, authenticated,
 loopback-only Qdrant client and the specified reciprocal-rank fusion algorithm.
 It remains dormant until onboarding installs and verifies the Qdrant executable
 and local embedding model; Pinky does not generate substitute embeddings.
+
+The in-progress cited-Q&A milestone now attaches either an existing local
+Ollama instance or an authenticated llama.cpp server. After vault unlock, open
+**Attach local model** and select the provider:
+
+- **Ollama (no key):** use `http://127.0.0.1:11434` and enter a model name shown
+  by `ollama list`. Pinky confirms that the model is installed locally, uses
+  is not a remote/cloud proxy, supports completion, uses GGUF, and advertises
+  at least 2,048 context tokens.
+- **llama-server (API key):** use `http://127.0.0.1:<port>` and its ephemeral
+  64-character hexadecimal API key. Pinky checks readiness and verifies the key
+  against the protected `/props` endpoint.
+
+Both providers must use an explicit IPv4 loopback port; Pinky bypasses ambient
+HTTP proxies. Attaching a model does not enable chat yet: supervised
+`llama-server` launch and the validated answer contract remain gated work in
+`docs/CITED_QA_PHASES.md`.
 
 ## Setup on Debian or Ubuntu
 

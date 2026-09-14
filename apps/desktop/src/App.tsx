@@ -1,14 +1,14 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { BookOpen, Box, ChevronRight, CirclePause, Database, FileText, FolderKey, KeyRound, LockKeyhole, MessageSquare, OctagonX, Play, Plus, Search, ShieldCheck, Square, X } from "lucide-react";
+import { BookOpen, Box, ChevronRight, CirclePause, Cpu, Database, FileText, FolderKey, KeyRound, LockKeyhole, MessageSquare, OctagonX, Play, Plus, Search, ShieldCheck, Square, X } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
-import type { CitationPassage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import type { AttachLlamaResponse, CitationPassage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
 
-const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, watcher_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
+const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, watcher_error: null, model_attach_in_progress: false, model_connected: false, model_provider: null, model_name: null, model_context_size: null, model_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
 
 function ActivityTerminal({ events }: { events: TaskEvent[] }) {
@@ -49,6 +49,13 @@ export function App() {
   const [approvedRoot, setApprovedRoot] = useState("");
   const [sourcePath, setSourcePath] = useState("");
   const [sourceError, setSourceError] = useState("");
+  const [modelOpen, setModelOpen] = useState(false);
+  const [modelProvider, setModelProvider] = useState<"ollama" | "llama-server">("ollama");
+  const [modelEndpoint, setModelEndpoint] = useState("http://127.0.0.1:11434");
+  const [ollamaModel, setOllamaModel] = useState("");
+  const [modelApiKey, setModelApiKey] = useState("");
+  const [modelError, setModelError] = useState("");
+  const [modelRunning, setModelRunning] = useState(false);
   const [listening, setListening] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(() => matchMedia("(prefers-reduced-motion: reduce)").matches);
   const tasks = useMemo(() => Object.values(events.reduce<Record<string, TaskEvent>>((latest, event) => ({ ...latest, [event.task_id]: event }), {})).sort((a, b) => b.sequence - a.sequence), [events]);
@@ -65,6 +72,9 @@ export function App() {
         setEvents((current) => mergeTaskEvents(current, [payload]));
         if (payload.state === "completed" && payload.phase.name === "local ingestion") {
           void invoke<SourceSummary[]>("list_sources").then(setSources).catch(() => undefined);
+        }
+        if (["completed", "failed", "cancelled"].includes(payload.state) && payload.phase.name === "model attach") {
+          void invoke<RuntimeStatus>("runtime_status").then(setStatus).catch(() => undefined);
         }
       }).catch(() => () => undefined)
       : Promise.resolve(() => undefined);
@@ -173,6 +183,35 @@ export function App() {
       closeSource();
     } catch (error) { setSourceError(String(error)); }
   };
+  const openModel = () => { setModelApiKey(""); setModelError(""); setModelOpen(true); };
+  const closeModel = () => {
+    if (modelRunning) return;
+    setModelApiKey(""); setModelError(""); setModelOpen(false);
+  };
+  const attachModel = async (event: FormEvent) => {
+    event.preventDefault(); setModelError("");
+    if (!IS_TAURI) { setModelError("Local model attachment is available only in the native application."); return; }
+    setModelRunning(true);
+    try {
+      if (modelProvider === "ollama") {
+        await invoke<AttachLlamaResponse>("attach_ollama", { request: { endpoint: modelEndpoint.trim(), model: ollamaModel.trim() } });
+      } else {
+        await invoke<AttachLlamaResponse>("attach_llama_server", { request: { endpoint: modelEndpoint.trim(), api_key: modelApiKey } });
+      }
+      setModelApiKey("");
+      setStatus(await invoke<RuntimeStatus>("runtime_status"));
+    } catch (error) { setModelError(String(error)); }
+    finally { setModelRunning(false); }
+  };
+  const detachModel = async () => {
+    if (!IS_TAURI) return;
+    setModelError("");
+    try {
+      await invoke("detach_local_model");
+      setStatus(await invoke<RuntimeStatus>("runtime_status"));
+      closeModel();
+    } catch (error) { setModelError(String(error)); }
+  };
 
   return <main className="app-shell">
     <a className="skip-link" href="#conversation">Skip to conversation</a>
@@ -216,7 +255,7 @@ export function App() {
           {task.error && <p className="task-error">{task.error.message}</p>}
         </article>)}
       </div>
-      <section className="runtime"><p className="eyebrow">RUNTIME</p>{Object.entries(status.prerequisites).map(([name, available]) => <div key={name}><span>{name.replace("_", " ")}</span><b className={available ? "ok" : "missing"}>{available ? "ready" : "missing"}</b></div>)}<div><span>task journal</span><b className={status.task_journal_error ? "missing" : "ok"} title={status.task_journal_error || undefined}>{status.task_journal_error ? "error" : status.vault_mounted ? "durable" : "locked"}</b></div><div><span>file watcher</span><b className={status.watcher_error ? "missing" : "ok"} title={status.watcher_error || undefined}>{status.watcher_error ? "error" : status.vault_mounted ? "watching" : "locked"}</b></div></section>
+      <section className="runtime"><p className="eyebrow">RUNTIME</p>{Object.entries(status.prerequisites).map(([name, available]) => <div key={name}><span>{name.replace("_", " ")}</span><b className={available ? "ok" : "missing"}>{available ? "ready" : "missing"}</b></div>)}<div><span>task journal</span><b className={status.task_journal_error ? "missing" : "ok"} title={status.task_journal_error || undefined}>{status.task_journal_error ? "error" : status.vault_mounted ? "durable" : "locked"}</b></div><div><span>file watcher</span><b className={status.watcher_error ? "missing" : "ok"} title={status.watcher_error || undefined}>{status.watcher_error ? "error" : status.vault_mounted ? "watching" : "locked"}</b></div><div><span>local model</span><b className={status.model_connected ? "ok" : status.model_error ? "missing" : ""} title={status.model_error || undefined}>{status.model_attach_in_progress ? "checking" : status.model_connected ? "attached" : status.model_error ? "error" : "offline"}</b></div><button className="runtime-action" disabled={!status.vault_mounted || status.model_attach_in_progress} onClick={openModel}><Cpu size={12} /> {status.model_connected ? "Model details" : "Attach local model"}</button></section>
       <section className="log-panel"><div className="log-title"><span>Live event log</span><span>schema 1.0</span></div><ActivityTerminal events={events} /></section>
     </aside>
     {setupOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeSetup(); }}>
@@ -231,6 +270,20 @@ export function App() {
           {(!status.prerequisites.gocryptfs || !status.prerequisites.secret_service) && <p className="setup-error" role="alert">Install gocryptfs and Secret Service tools before creating the vault.</p>}
           {setupError && <p className="setup-error" role="alert">{setupError}</p>}
           <footer><button type="button" disabled={setupRunning} onClick={closeSetup}>Cancel</button><button className="primary" disabled={setupRunning || !status.prerequisites.gocryptfs || !status.prerequisites.secret_service}>{setupRunning ? "Creating encrypted vault…" : "Create vault"}</button></footer>
+        </form>}
+      </section>
+    </div>}
+    {modelOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeModel(); }}>
+      <section className="setup-modal model-modal" role="dialog" aria-modal="true" aria-labelledby="model-title">
+        <header><div><p className="eyebrow">LOCAL INFERENCE</p><h2 id="model-title">Attach local model</h2></div><button aria-label="Close model connection" disabled={modelRunning} onClick={closeModel}><X size={17} /></button></header>
+        {status.model_connected ? <div className="setup-complete"><Cpu size={34} /><h3>{status.model_name}</h3><p>{status.model_provider} model attached with {status.model_context_size?.toLocaleString()} context tokens.</p><p>{status.model_provider === "Ollama" ? "The local Ollama API does not require or store an API key." : "The API key exists only in this Pinky process."} Question answering remains disabled until its evidence contract is implemented.</p>{modelError && <p className="setup-error" role="alert">{modelError}</p>}<button className="disconnect-model" onClick={() => void detachModel()}>Detach model</button></div> : <form onSubmit={attachModel}>
+          <div className="setup-intro"><Cpu size={21} /><p>{modelProvider === "ollama" ? "Connect to an already-running local Ollama instance without an API key." : "Connect to an already-running llama.cpp server using its ephemeral API key."} Pinky accepts only an IPv4 loopback endpoint.</p></div>
+          <label>Provider<select value={modelProvider} onChange={(event) => { const provider = event.target.value as "ollama" | "llama-server"; setModelProvider(provider); setModelEndpoint(provider === "ollama" ? "http://127.0.0.1:11434" : "http://127.0.0.1:8080"); setModelApiKey(""); setModelError(""); }}><option value="ollama">Ollama (no key)</option><option value="llama-server">llama-server (API key)</option></select></label>
+          <label>Server endpoint<input type="url" value={modelEndpoint} onChange={(event) => setModelEndpoint(event.target.value)} placeholder={modelProvider === "ollama" ? "http://127.0.0.1:11434" : "http://127.0.0.1:8080"} spellCheck={false} required /></label>
+          {modelProvider === "ollama" ? <label>Installed model name<input value={ollamaModel} onChange={(event) => setOllamaModel(event.target.value)} placeholder="qwen3:8b" spellCheck={false} required /></label> : <label>256-bit API key<input type="password" autoComplete="off" value={modelApiKey} onChange={(event) => setModelApiKey(event.target.value)} minLength={64} maxLength={64} pattern="[0-9A-Fa-f]{64}" spellCheck={false} required /></label>}
+          <p className="source-support">{modelProvider === "ollama" ? <>Enter a model shown by <code>ollama list</code>. Pinky verifies it through <code>/api/tags</code> and <code>/api/show</code>; remote/cloud proxies are rejected, and only a local GGUF completion model with at least 2,048 context tokens is accepted.</> : <>The server must use the same 64-character hexadecimal token, expose <code>/health</code> and <code>/props</code>, and provide at least 2,048 context tokens.</>}</p>
+          {(modelError || status.model_error) && <p className="setup-error" role="alert">{modelError || status.model_error}</p>}
+          <footer><button type="button" disabled={modelRunning} onClick={closeModel}>Cancel</button><button className="primary" disabled={modelRunning}>{modelRunning ? "Checking local model…" : "Attach model"}</button></footer>
         </form>}
       </section>
     </div>}

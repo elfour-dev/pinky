@@ -29,6 +29,9 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [ ] PDF, office, image/OCR, and isolated-worker extractors
 - [x] Encrypted Tantivy lexical index and exact retained-version citation viewer
 - [x] Authenticated loopback Qdrant supervision/client and reciprocal-rank fusion contract
+- [x] Strict token-bearing loopback llama-server health client contract
+- [x] Explicit no-key loopback Ollama attach, local-model validation, and live
+  SSH-tunnel acceptance
 - [ ] Embedding model integration and end-to-end Qdrant vector indexing
 - [ ] Model onboarding, hybrid retrieval, cited chat, claims, and dossiers
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
@@ -83,7 +86,10 @@ reranking, answer generation, and cited conversational responses remain later
 slices.
 
 The vector boundary prepares a supervised Qdrant process on random
-loopback-only HTTP and gRPC ports with a new 256-bit API key on every launch.
+loopback-only HTTP and gRPC ports with a new 256-bit API key on every managed
+launch. Explicit attachment also supports Ollama's unauthenticated local API on
+an exact IPv4-loopback origin; remote Ollama and Ollama cloud endpoints remain
+out of scope.
 Its storage and snapshots are constrained to checked directories inside the
 mounted vault, and dropping the sidecar aborts the same process-group supervisor
 used by cancellable workers. The client creates a cosine collection with HNSW
@@ -93,6 +99,35 @@ rank fusion uses `k = 60`, deduplicates chunk UUIDs, and caps results at three
 chunks per source version. This is a tested runtime contract, not yet a user
 feature: the signed embedding model and Qdrant executable still need onboarding
 before real vector indexing can begin.
+
+The initial local-model boundary accepts only an explicit
+`http://127.0.0.1:<port>` llama-server origin, requires a 256-bit hexadecimal
+bearer token, bypasses ambient proxies, redacts the token from diagnostics, and
+validates a bounded, cancellable health request. A deterministic loopback test
+verifies the request path and authorization header. This is the Q1A transport
+contract only. The upstream health route is public, so authentication must also
+be proven against a protected endpoint before questions are enabled. Desktop
+configuration, server supervision, model identity, generation, and answer
+validation remain gated follow-up phases documented in
+`docs/CITED_QA_PHASES.md`.
+
+The desktop now exposes the attach portion of Q1B after vault unlock. It accepts
+an ephemeral endpoint and token, checks the public health route, proves the
+token against the protected `/props` route, validates a non-empty model path,
+at least one slot, and at least 2,048 context tokens, then shows the attached
+model and context size. Detaching or losing the verified vault drops the client
+and zeroizes its in-memory token. Supervised executable launch, target-host
+model smoke testing, and cited generation remain incomplete, so Q1B is not yet
+accepted.
+
+The Ollama-first runtime path is accepted independently of managed
+`llama-server`. Pinky accepts no-key Ollama only through an exact IPv4-loopback
+origin, rejects remote/cloud model metadata, and requires a local GGUF
+completion model with at least 2,048 context tokens. Native desktop state tests
+cover the vault and attachment lifecycle. The opt-in target-host test passed on
+2026-09-14 through the user's SSH tunnel at `127.0.0.1:11435`, probing Ollama
+0.33.2 and `qwen3.5:9b` with 262,144 advertised context tokens. No generation
+request was made during this phase.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and

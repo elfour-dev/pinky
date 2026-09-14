@@ -8,9 +8,10 @@ use std::{
 
 use pinky_core::{
     create_registered_vault, read_registration, unlock_registered_vault, CitationPassage,
-    GocryptfsMount, LocalFileFingerprint, LocalIngestor, LocalWatchTarget, ObjectStore,
-    OnboardedVault, RetrievalService, SearchHit, SourceSummary, SystemVaultPlatform, TaskJournal,
-    TaskManager, VaultPaths, VaultRegistration,
+    GocryptfsMount, LlamaClient, LlamaError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget,
+    ObjectStore, OllamaClient, OllamaError, OllamaRuntimeInfo, OnboardedVault, RetrievalService,
+    SearchHit, SourceSummary, SystemVaultPlatform, TaskJournal, TaskManager, VaultPaths,
+    VaultRegistration,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -27,6 +28,12 @@ struct RuntimeStatus {
     unlock_error: Option<String>,
     task_journal_error: Option<String>,
     watcher_error: Option<String>,
+    model_attach_in_progress: bool,
+    model_connected: bool,
+    model_provider: Option<String>,
+    model_name: Option<String>,
+    model_context_size: Option<u64>,
+    model_error: Option<String>,
     prerequisites: BTreeMap<&'static str, bool>,
 }
 
@@ -37,6 +44,22 @@ struct RuntimeData {
     unlock_error: Option<String>,
     watcher_error: Option<String>,
     vault: Option<OnboardedVault<GocryptfsMount>>,
+    model_attach_in_progress: bool,
+    model_error: Option<String>,
+    attached_model: Option<AttachedModel>,
+}
+
+struct AttachedModel {
+    _client: AttachedModelClient,
+    provider: &'static str,
+    model_name: String,
+    context_size: u64,
+    total_slots: u64,
+}
+
+struct AttachedModelClient {
+    _llama: Option<LlamaClient>,
+    _ollama: Option<OllamaClient>,
 }
 
 #[derive(Clone)]
@@ -59,6 +82,9 @@ impl AppRuntime {
                 unlock_error: error,
                 watcher_error: None,
                 vault: None,
+                model_attach_in_progress: false,
+                model_error: None,
+                attached_model: None,
             })),
             registration_path: Arc::new(registration_path),
             watcher: Arc::new(Mutex::new(None)),
@@ -79,6 +105,26 @@ struct IngestLocalFileRequest {
     source_path: PathBuf,
 }
 
+#[derive(Deserialize)]
+struct AttachLlamaRequest {
+    endpoint: String,
+    api_key: String,
+}
+
+#[derive(Deserialize)]
+struct AttachOllamaRequest {
+    endpoint: String,
+    model: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AttachLlamaResponse {
+    provider: String,
+    model_name: String,
+    context_size: u64,
+    total_slots: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct SetupVaultResponse {
     vault_id: Uuid,
@@ -87,11 +133,14 @@ struct SetupVaultResponse {
 
 #[tauri::command]
 fn runtime_status(runtime: State<'_, AppRuntime>, tasks: State<'_, TaskManager>) -> RuntimeStatus {
-    let data = runtime.data.lock().unwrap();
+    let mut data = runtime.data.lock().unwrap();
     let mounted = data
         .vault
         .as_ref()
         .is_some_and(|session| session.vault.ensure_mounted().is_ok());
+    if !mounted {
+        invalidate_model_if_unmounted(&mut data, false);
+    }
     RuntimeStatus {
         vault_mounted: mounted,
         setup_in_progress: data.setup_in_progress,
@@ -104,6 +153,18 @@ fn runtime_status(runtime: State<'_, AppRuntime>, tasks: State<'_, TaskManager>)
         unlock_error: data.unlock_error.clone(),
         task_journal_error: tasks.journal_error(),
         watcher_error: data.watcher_error.clone(),
+        model_attach_in_progress: data.model_attach_in_progress,
+        model_connected: data.attached_model.is_some(),
+        model_provider: data
+            .attached_model
+            .as_ref()
+            .map(|model| model.provider.to_owned()),
+        model_name: data
+            .attached_model
+            .as_ref()
+            .map(|model| model.model_name.clone()),
+        model_context_size: data.attached_model.as_ref().map(|model| model.context_size),
+        model_error: data.model_error.clone(),
         prerequisites: BTreeMap::from([
             ("gocryptfs", command_exists("gocryptfs")),
             ("podman", command_exists("podman")),
@@ -111,6 +172,213 @@ fn runtime_status(runtime: State<'_, AppRuntime>, tasks: State<'_, TaskManager>)
             ("vulkan", command_exists("vulkaninfo")),
         ]),
     }
+}
+
+#[tauri::command]
+async fn attach_llama_server(
+    request: AttachLlamaRequest,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<AttachLlamaResponse, String> {
+    let runtime = runtime.inner().clone();
+    begin_model_attach(&runtime)?;
+
+    let endpoint = request.endpoint;
+    let api_key = Zeroizing::new(request.api_key);
+    let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+    tasks
+        .inner()
+        .clone()
+        .spawn("model attach", None, move |context| async move {
+            context.progress(
+                "model attach",
+                None,
+                "Checking local llama-server readiness and authentication",
+            );
+            let result = async {
+                let client =
+                    LlamaClient::connect(&endpoint, api_key).map_err(|error| error.to_string())?;
+                let info = client
+                    .probe(&context.cancellation_token())
+                    .await
+                    .map_err(|error| match error {
+                        LlamaError::Cancelled => "cancelled".to_owned(),
+                        error => error.to_string(),
+                    })?;
+                Ok(AttachedModel {
+                    _client: AttachedModelClient {
+                        _llama: Some(client),
+                        _ollama: None,
+                    },
+                    provider: "llama-server",
+                    model_name: display_model_name(&info.model_path),
+                    context_size: info.context_size,
+                    total_slots: info.total_slots,
+                })
+            }
+            .await;
+            let task_result = result.as_ref().map(|_| ()).map_err(Clone::clone);
+            let _ = result_sender.send(result);
+            task_result
+        });
+
+    let result = result_receiver
+        .await
+        .map_err(|_| "model attach task ended without a result".to_owned())?;
+    finish_model_attach(&runtime, result)
+}
+
+#[tauri::command]
+async fn attach_ollama(
+    request: AttachOllamaRequest,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<AttachLlamaResponse, String> {
+    let runtime = runtime.inner().clone();
+    begin_model_attach(&runtime)?;
+
+    let endpoint = request.endpoint;
+    let model_name = request.model;
+    let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+    tasks
+        .inner()
+        .clone()
+        .spawn("model attach", None, move |context| async move {
+            context.progress(
+                "model attach",
+                None,
+                "Checking local Ollama model availability and context",
+            );
+            let result = async {
+                let client = OllamaClient::connect(&endpoint, &model_name)
+                    .map_err(|error| error.to_string())?;
+                let info = client
+                    .probe(&context.cancellation_token())
+                    .await
+                    .map_err(|error| match error {
+                        OllamaError::Cancelled => "cancelled".to_owned(),
+                        error => error.to_string(),
+                    })?;
+                Ok(ollama_attached_model(client, info))
+            }
+            .await;
+            let task_result = result.as_ref().map(|_| ()).map_err(Clone::clone);
+            let _ = result_sender.send(result);
+            task_result
+        });
+
+    let result = result_receiver
+        .await
+        .map_err(|_| "model attach task ended without a result".to_owned())?;
+    finish_model_attach(&runtime, result)
+}
+
+fn begin_model_attach(runtime: &AppRuntime) -> Result<(), String> {
+    let mut data = runtime.data.lock().unwrap();
+    let mounted = data
+        .vault
+        .as_ref()
+        .is_some_and(|session| session.vault.ensure_mounted().is_ok());
+    begin_model_attach_state(&mut data, mounted)
+}
+
+fn begin_model_attach_state(data: &mut RuntimeData, mounted: bool) -> Result<(), String> {
+    if !mounted {
+        return Err("unlock the encrypted vault before connecting a model".into());
+    }
+    if data.model_attach_in_progress {
+        return Err("a model connection is already in progress".into());
+    }
+    data.model_attach_in_progress = true;
+    data.model_error = None;
+    Ok(())
+}
+
+fn finish_model_attach(
+    runtime: &AppRuntime,
+    result: Result<AttachedModel, String>,
+) -> Result<AttachLlamaResponse, String> {
+    let mut data = runtime.data.lock().unwrap();
+    let mounted = data
+        .vault
+        .as_ref()
+        .is_some_and(|session| session.vault.ensure_mounted().is_ok());
+    finish_model_attach_state(&mut data, mounted, result)
+}
+
+fn finish_model_attach_state(
+    data: &mut RuntimeData,
+    mounted: bool,
+    result: Result<AttachedModel, String>,
+) -> Result<AttachLlamaResponse, String> {
+    data.model_attach_in_progress = false;
+    match result {
+        Ok(model) => {
+            if !mounted {
+                data.attached_model = None;
+                let error = "the encrypted vault became unavailable while attaching the model";
+                data.model_error = Some(error.into());
+                return Err(error.into());
+            }
+            let response = AttachLlamaResponse {
+                provider: model.provider.to_owned(),
+                model_name: model.model_name.clone(),
+                context_size: model.context_size,
+                total_slots: model.total_slots,
+            };
+            data.attached_model = Some(model);
+            data.model_error = None;
+            Ok(response)
+        }
+        Err(error) => {
+            data.attached_model = None;
+            data.model_error = Some(error.clone());
+            Err(error)
+        }
+    }
+}
+
+fn ollama_attached_model(client: OllamaClient, info: OllamaRuntimeInfo) -> AttachedModel {
+    AttachedModel {
+        _client: AttachedModelClient {
+            _llama: None,
+            _ollama: Some(client),
+        },
+        provider: "Ollama",
+        model_name: info.model_name,
+        context_size: info.context_size,
+        total_slots: 1,
+    }
+}
+
+#[tauri::command]
+fn detach_local_model(runtime: State<'_, AppRuntime>) -> Result<(), String> {
+    let mut data = runtime.data.lock().unwrap();
+    detach_model_state(&mut data)
+}
+
+fn detach_model_state(data: &mut RuntimeData) -> Result<(), String> {
+    if data.model_attach_in_progress {
+        return Err("cancel the active model connection task before detaching".into());
+    }
+    data.attached_model = None;
+    data.model_error = None;
+    Ok(())
+}
+
+fn invalidate_model_if_unmounted(data: &mut RuntimeData, mounted: bool) {
+    if !mounted {
+        data.attached_model = None;
+    }
+}
+
+fn display_model_name(model_path: &str) -> String {
+    std::path::Path::new(model_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("local model")
+        .to_owned()
 }
 
 #[tauri::command]
@@ -764,8 +1032,62 @@ fn command_exists(program: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let tasks = TaskManager::new();
+            let registration_path = app.path().app_config_dir()?.join("vault-registration.json");
+            let (registration, registration_error) = if registration_path.exists() {
+                match read_registration(&registration_path) {
+                    Ok(registration) => (Some(registration), None),
+                    Err(error) => (None, Some(error.to_string())),
+                }
+            } else {
+                (None, None)
+            };
+            let runtime = AppRuntime::new(registration_path, registration, registration_error);
+            let mut events = tasks.subscribe();
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Ok(event) = events.recv().await {
+                    let _ = handle.emit("pinky://task-event", event);
+                }
+            });
+            app.manage(tasks.clone());
+            app.manage(runtime.clone());
+            let should_unlock = runtime.data.lock().unwrap().registration.is_some();
+            if should_unlock {
+                tauri::async_runtime::spawn(async move {
+                    let _ = unlock_runtime(runtime, tasks).await;
+                });
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            runtime_status,
+            attach_llama_server,
+            attach_ollama,
+            detach_local_model,
+            default_vault_paths,
+            setup_vault,
+            unlock_vault,
+            start_system_check,
+            ingest_local_file,
+            list_sources,
+            search_sources,
+            open_citation,
+            cancel_task,
+            pause_task,
+            cancel_all_tasks,
+            task_snapshot
+        ])
+        .run(tauri::generate_context!())
+        .expect("failed to run Pinky desktop application");
+}
+
 #[cfg(test)]
-mod watcher_tests {
+mod desktop_tests {
     use super::*;
     use pinky_core::{Database, MountVerifier, Vault};
     use std::path::Path;
@@ -898,55 +1220,77 @@ mod watcher_tests {
         cancellation.cancel();
         watcher.await.unwrap();
     }
-}
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    tauri::Builder::default()
-        .setup(|app| {
-            let tasks = TaskManager::new();
-            let registration_path = app.path().app_config_dir()?.join("vault-registration.json");
-            let (registration, registration_error) = if registration_path.exists() {
-                match read_registration(&registration_path) {
-                    Ok(registration) => (Some(registration), None),
-                    Err(error) => (None, Some(error.to_string())),
-                }
-            } else {
-                (None, None)
-            };
-            let runtime = AppRuntime::new(registration_path, registration, registration_error);
-            let mut events = tasks.subscribe();
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                while let Ok(event) = events.recv().await {
-                    let _ = handle.emit("pinky://task-event", event);
-                }
-            });
-            app.manage(tasks.clone());
-            app.manage(runtime.clone());
-            let should_unlock = runtime.data.lock().unwrap().registration.is_some();
-            if should_unlock {
-                tauri::async_runtime::spawn(async move {
-                    let _ = unlock_runtime(runtime, tasks).await;
-                });
-            }
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            runtime_status,
-            default_vault_paths,
-            setup_vault,
-            unlock_vault,
-            start_system_check,
-            ingest_local_file,
-            list_sources,
-            search_sources,
-            open_citation,
-            cancel_task,
-            pause_task,
-            cancel_all_tasks,
-            task_snapshot
-        ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Pinky desktop application");
+    fn attached_test_model() -> AttachedModel {
+        AttachedModel {
+            _client: AttachedModelClient {
+                _llama: None,
+                _ollama: Some(
+                    OllamaClient::connect("http://127.0.0.1:9", "test-model:latest").unwrap(),
+                ),
+            },
+            provider: "Ollama",
+            model_name: "test-model:latest".into(),
+            context_size: 4_096,
+            total_slots: 1,
+        }
+    }
+
+    #[test]
+    fn model_attach_state_requires_a_mount_and_excludes_concurrent_attach() {
+        let mut data = RuntimeData::default();
+        assert_eq!(
+            begin_model_attach_state(&mut data, false).unwrap_err(),
+            "unlock the encrypted vault before connecting a model"
+        );
+        begin_model_attach_state(&mut data, true).unwrap();
+        assert!(data.model_attach_in_progress);
+        assert_eq!(
+            begin_model_attach_state(&mut data, true).unwrap_err(),
+            "a model connection is already in progress"
+        );
+    }
+
+    #[test]
+    fn model_attach_success_detach_and_vault_loss_update_desktop_state() {
+        let mut data = RuntimeData {
+            model_attach_in_progress: true,
+            ..RuntimeData::default()
+        };
+        let response =
+            finish_model_attach_state(&mut data, true, Ok(attached_test_model())).unwrap();
+        assert_eq!(response.provider, "Ollama");
+        assert_eq!(response.model_name, "test-model:latest");
+        assert_eq!(response.context_size, 4_096);
+        assert!(data.attached_model.is_some());
+        assert!(!data.model_attach_in_progress);
+
+        invalidate_model_if_unmounted(&mut data, false);
+        assert!(data.attached_model.is_none());
+
+        data.attached_model = Some(attached_test_model());
+        detach_model_state(&mut data).unwrap();
+        assert!(data.attached_model.is_none());
+        assert!(data.model_error.is_none());
+    }
+
+    #[test]
+    fn failed_model_attach_is_visible_and_detach_refuses_active_work() {
+        let mut data = RuntimeData {
+            model_attach_in_progress: true,
+            attached_model: Some(attached_test_model()),
+            ..RuntimeData::default()
+        };
+        assert_eq!(
+            detach_model_state(&mut data).unwrap_err(),
+            "cancel the active model connection task before detaching"
+        );
+        assert_eq!(
+            finish_model_attach_state(&mut data, true, Err("invalid model response".into()))
+                .unwrap_err(),
+            "invalid model response"
+        );
+        assert!(data.attached_model.is_none());
+        assert_eq!(data.model_error.as_deref(), Some("invalid model response"));
+    }
 }

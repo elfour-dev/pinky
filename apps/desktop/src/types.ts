@@ -13,10 +13,17 @@ export interface RuntimeStatus {
   unlock_error: string | null;
   task_journal_error: string | null;
   watcher_error: string | null;
+  model_attach_in_progress: boolean;
+  model_connected: boolean;
+  model_provider: string | null;
+  model_name: string | null;
+  model_context_size: number | null;
+  model_error: string | null;
   prerequisites: Record<string, boolean>;
 }
 export interface VaultPaths { cipher_dir: string; mount_dir: string; }
 export interface SetupVaultResponse { vault_id: string; recovery_path: string; }
+export interface AttachLlamaResponse { provider: string; model_name: string; context_size: number; total_slots: number; }
 export interface SourceSummary {
   source_id: string;
   version_id: string;

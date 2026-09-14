@@ -1,114 +1,119 @@
 # Next-session handoff
 
-Recorded: 2026-07-28
+Recorded: 2026-09-14
 
-## User objective
+## Active objective
 
-Continue Pinky while sharply reducing paid-token expenditure. The direction to
-evaluate next is a **Pinky Lite** cited-local-Q&A milestone followed by a
-constrained offline self-development harness. See
-[`OFFLINE_SELF_DEVELOPMENT.md`](OFFLINE_SELF_DEVELOPMENT.md).
+Deliver the cost-first Pinky Lite milestone: useful local question answering
+over encrypted retained sources, with exact citations, visible cancellation,
+and encrypted conversations. The complete version-one specification remains
+the longer-term scope; embeddings, Qdrant, web research, and generation are not
+prerequisites for Pinky Lite.
 
-Do not assume authorization to discard the complete version-one specification.
-The offline route is a delivery strategy and sequencing change; the user should
-confirm the pivot before implementation changes that remove or replace scope.
+The authoritative delivery sequence, contracts, and gates are in
+[`CITED_QA_PHASES.md`](CITED_QA_PHASES.md).
 
-## Last committed state
-
-Current `HEAD` when this handoff was written:
+## Last committed baseline
 
 ```text
-6bbadef feat: add encrypted source retrieval and citations
+8e47e57 feat: add hybrid retrieval foundation and vault tutorials
 ```
 
-That commit provides encrypted Tantivy lexical indexing, index rebuilding from
-retained chunks, composer-based source search, and exact retained-version
-`pinky://` citation reopening. Earlier commits provide encrypted vault setup and
-restart unlocking, secure local text ingestion, stable-file watching, task
-journaling, cancellation, process supervision, packaging checks, and the native
-desktop shell.
+That baseline includes encrypted vault setup and restart unlock, approved local
+text ingestion, stable-file watching, source versioning, lexical retrieval,
+exact retained citations, task journaling and cancellation, the desktop shell,
+the Qdrant/RRF foundation, user guides, and tutorial sources.
 
-## Uncommitted work that must be preserved
+## Current in-progress phase
 
-The working tree contains the next vector-retrieval foundation:
+Q1A, the local model core connection contract, has been implemented but is not
+committed:
 
-- `crates/pinky-core/src/hybrid.rs`: reciprocal-rank fusion with `k = 60`, chunk
-  deduplication, and a three-chunk limit per source version;
-- `crates/pinky-core/src/qdrant.rs`: supervised Qdrant launch configuration,
-  random loopback ports, a fresh 256-bit API key, checked vault-resident storage,
-  authenticated REST operations, cosine vectors, on-disk HNSW, scalar int8
-  quantization, vector normalization, and shutdown through the existing process
-  supervisor;
-- dependency and export changes in `Cargo.lock`,
-  `crates/pinky-core/Cargo.toml`, and `crates/pinky-core/src/lib.rs`;
-- factual status changes in `README.md` and `docs/IMPLEMENTATION_STATUS.md`.
+- `crates/pinky-core/src/llama.rs` accepts only an explicit
+  `http://127.0.0.1:<port>` origin;
+- it requires a 256-bit hexadecimal bearer token and bypasses ambient proxies;
+- secrets are redacted from diagnostics;
+- the bounded readiness request supports cooperative cancellation;
+- the current upstream llama.cpp `{"status":"ok"}` health response is strictly
+  validated; and
+- deterministic tests verify endpoint rejection, key validation, redaction,
+  authorization-header transmission, readiness parsing, and pre-cancellation.
 
-Do not overwrite, revert, or regenerate these changes. Inspect the live diff
-before continuing because this handoff itself is also uncommitted.
+The explicit runtime boundary is complete for the Ollama-first delivery track:
 
-## Verification already completed
+- the desktop exposes a vault-only attach form;
+- endpoint and API key values remain ephemeral;
+- `/props` proves the token on a protected endpoint;
+- model path, slot count, and a minimum 2,048-token context are validated;
+- attached model name, context size, errors, and task state are surfaced; and
+- detach or vault loss drops the client and zeroizes its token.
 
-Before this handoff was added:
+The explicit attach screen also supports a local Ollama provider:
 
-- `cargo test --workspace`: 49 core tests and 3 desktop Rust tests passed;
-- the opt-in live Secret Service/FUSE test remained ignored as designed;
-- `cargo fmt --all` and `git diff --check` passed;
-- Clippy was not run because the temporary Rust toolchain does not contain the
-  `cargo-clippy` component.
+- it accepts only an explicit `http://127.0.0.1:<port>` origin and bypasses
+  ambient proxies;
+- it follows Ollama's local no-authentication API and sends no authorization
+  header;
+- the user selects an installed model by name;
+- `/api/version`, `/api/tags`, and `/api/show` validate the runtime, local model
+  presence, absence of a remote/cloud target, completion capability, GGUF
+  format, and minimum 2,048-token context; and
+- deterministic loopback tests cover no-key requests, model validation, and
+  cancellation.
 
-The temporary toolchain used in this environment is:
+Native desktop state tests cover lock, concurrency, success, failure, detach,
+and vault loss. The opt-in live test passed on 2026-09-14 through the user's SSH
+tunnel at `127.0.0.1:11435`, probing Ollama 0.33.2 and `qwen3.5:9b` with 262,144
+advertised context tokens. Managed llama-server remains a non-blocking
+compatibility track.
 
-```bash
-PATH=/tmp/pinky-cargo/bin:$PATH \
-RUSTUP_HOME=/tmp/pinky-rustup \
-CARGO_HOME=/tmp/pinky-cargo \
-cargo test --workspace
-```
+The health endpoint is public by llama.cpp design, so readiness alone is never
+treated as proof of authentication.
 
-Run verification again after any subsequent edits. Do not claim a live Qdrant
-acceptance test: no verified Qdrant executable or embedding model has been
-installed yet.
+Strict Clippy exposed two baseline design warnings during Q1A. They were fixed
+without changing behavior by grouping task-event transition fields into a
+typed update and moving the desktop test module after runtime items.
 
-## Recommended next decision
+## Verification completed
 
-Ask the user to confirm one of these implementation directions before writing
-the next runtime slice:
+- `cargo fmt --all --check`: passed
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed
+- `cargo test --workspace`: 63 core and 6 desktop tests passed
+- opt-in live Ollama target-host test: passed separately
+- opt-in live Secret Service/FUSE and Ollama tests: ignored in the ordinary
+  regression suite as designed
+- `npm test`: 3 frontend tests passed
+- `npm run build`: passed with the existing Vite chunk-size warning
+- `git diff --check`: passed
 
-1. **Cost-first Pinky Lite:** connect an explicitly supplied loopback
-   `llama-server`, generate cited answers from current lexical results, persist
-   conversations, and defer model downloading plus Qdrant embeddings.
-2. **Original delivery order:** finish signed model onboarding, verified model
-   downloads, embeddings, Qdrant backfill, hybrid retrieval, and reranking
-   before enabling cited chat.
+The deterministic fake llama-server test needs loopback permission; the
+restricted filesystem sandbox returned `EPERM`, and the same suite passed when
+run with explicit local-loopback permission.
 
-The cost-first direction is recommended because it produces useful local Q&A
-with fewer paid implementation sessions and creates the model runtime needed by
-the later offline developer.
+## Next implementation slice: R2 Ollama generation transport
 
-## Cost-first implementation sequence
+The user has connected Pinky to an Ollama model through the explicit attach
+path. Follow `CITED_QA_PHASES.md` and implement R2 next:
 
-If the user confirms the pivot:
+1. Add the provider-neutral inference boundary.
+2. Implement bounded, cancellable Ollama `/api/chat` structured output.
+3. Reject response model mismatches and remote/cloud metadata.
+4. Cover the protocol and every defined failure with a deterministic fake
+   Ollama server.
+5. Run a non-sensitive target-host schema smoke test.
 
-1. Specify a strict loopback-only `llama-server` configuration and health check.
-2. Add supervised launch or explicit attach mode with a per-launch token.
-3. Send selected lexical passages through a source-grounded answer schema.
-4. Reject factual sentences without mapped citations and expose unresolved
-   gaps rather than inventing evidence.
-5. Persist immutable encrypted conversations and messages.
-6. Make inference cancellable and visible in the task panel.
-7. Add native end-to-end coverage for a deterministic fake model server, then
-   run a target-host smoke test with the chosen local GGUF.
-8. Only then build the task-packet, snapshot, sandbox, test, retry, and
-   escalation components described in the offline strategy.
+Do not display or persist generated text during R2. Supervised llama-server
+launch remains a parallel compatibility track and no longer blocks the
+Ollama-first Pinky Lite route. Do not download a model or executable implicitly.
 
-## Commands for orientation
+## Orientation commands
 
 ```bash
 git status --short
 git diff --check
-git diff -- crates/pinky-core/src/hybrid.rs crates/pinky-core/src/qdrant.rs
-sed -n '1,220p' docs/OFFLINE_SELF_DEVELOPMENT.md
-sed -n '1,220p' docs/IMPLEMENTATION_STATUS.md
+git diff -- crates/pinky-core/src/llama.rs crates/pinky-core/src/task.rs
+sed -n '1,260p' docs/CITED_QA_PHASES.md
+/home/mickey/.cargo/bin/cargo test --workspace
 ```
 
 Do not commit unless the user explicitly asks for a commit.

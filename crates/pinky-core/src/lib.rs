@@ -7,7 +7,9 @@
 pub mod database;
 pub mod hybrid;
 pub mod ingestion;
+pub mod llama;
 pub mod object_store;
+pub mod ollama;
 pub mod onboarding;
 pub mod process;
 pub mod qdrant;
@@ -25,9 +27,11 @@ pub use ingestion::{
     IngestedSource, IngestionError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget,
     SourceSummary,
 };
+pub use llama::{LlamaClient, LlamaError, LlamaHealth, LlamaRuntimeInfo, MIN_CHAT_CONTEXT};
 pub use object_store::{
     CompressionClass, ObjectMetadata, ObjectStore, ObjectStoreError, StoredObject,
 };
+pub use ollama::{OllamaClient, OllamaError, OllamaRuntimeInfo};
 pub use onboarding::{
     create_registered_vault, create_vault, read_registration, unlock_registered_vault,
     write_registration, GocryptfsMount, OnboardedVault, OnboardingError, SystemVaultPlatform,
