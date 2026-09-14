@@ -28,7 +28,8 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Stable-change local-file watching, automatic re-versioning, and missing-file state
 - [ ] PDF, office, image/OCR, and isolated-worker extractors
 - [x] Encrypted Tantivy lexical index and exact retained-version citation viewer
-- [ ] Qdrant vector retrieval and hybrid rank fusion
+- [x] Authenticated loopback Qdrant supervision/client and reciprocal-rank fusion contract
+- [ ] Embedding model integration and end-to-end Qdrant vector indexing
 - [ ] Model onboarding, hybrid retrieval, cited chat, claims, and dossiers
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
 - [ ] Workspace snapshots, permissions, Podman tools, and app generation
@@ -80,6 +81,18 @@ opens exact `pinky://source/.../version/...#chunk-...` citations with retained
 passage text, source provenance, coordinates, and retrieval time. Qdrant,
 reranking, answer generation, and cited conversational responses remain later
 slices.
+
+The vector boundary prepares a supervised Qdrant process on random
+loopback-only HTTP and gRPC ports with a new 256-bit API key on every launch.
+Its storage and snapshots are constrained to checked directories inside the
+mounted vault, and dropping the sidecar aborts the same process-group supervisor
+used by cancellable workers. The client creates a cosine collection with HNSW
+and scalar int8 quantization on disk, normalizes vectors, upserts UUID points,
+and queries with authenticated requests that bypass ambient proxies. Reciprocal
+rank fusion uses `k = 60`, deduplicates chunk UUIDs, and caps results at three
+chunks per source version. This is a tested runtime contract, not yet a user
+feature: the signed embedding model and Qdrant executable still need onboarding
+before real vector indexing can begin.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and

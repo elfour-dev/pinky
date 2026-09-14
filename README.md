@@ -4,6 +4,14 @@ Pinky is a private, source-grounded Linux desktop assistant. This repository is
 being delivered in six acceptance-gated stages; it is not yet a version-one
 release.
 
+Planning and resumption documents:
+
+- [Vault setup and usage guide](docs/VAULT_GUIDE.md)
+- [Hands-on vault tutorial and example sources](docs/VAULT_TUTORIAL.md)
+- [Offline self-development strategy](docs/OFFLINE_SELF_DEVELOPMENT.md)
+- [Next-session handoff](docs/NEXT_SESSION.md)
+- [Implementation acceptance ledger](docs/IMPLEMENTATION_STATUS.md)
+
 ## Current milestone
 
 The executable stage-one foundation currently includes:
@@ -42,32 +50,128 @@ release gates remain unimplemented. The composer searches retained evidence but
 does not yet synthesize chat answers; that requires the local model runtime.
 Retained-data operations remain disabled while the vault is unavailable.
 
-## Development
+Core also contains the next retrieval foundation: a supervised, authenticated,
+loopback-only Qdrant client and the specified reciprocal-rank fusion algorithm.
+It remains dormant until onboarding installs and verifies the Qdrant executable
+and local embedding model; Pinky does not generate substitute embeddings.
 
-Prerequisites for building are Node.js 20+, Rust stable, the Tauri 2 Linux system
-dependencies, SQLCipher build dependencies, and a C toolchain.
+## Setup on Debian or Ubuntu
+
+The commands below describe a fresh development installation. Do not begin with
+`npm run tauri dev` until both Node.js and Rust/Cargo are available.
+
+### 1. Install native dependencies
+
+Install the current Tauri 2 Linux build dependencies together with the two
+tools required to create and unlock Pinky's encrypted vault:
 
 ```bash
+sudo apt update
+sudo apt install -y \
+  build-essential \
+  curl \
+  file \
+  gocryptfs \
+  libayatana-appindicator3-dev \
+  libsecret-tools \
+  libssl-dev \
+  libwebkit2gtk-4.1-dev \
+  libxdo-dev \
+  librsvg2-dev \
+  pkg-config \
+  wget
+```
+
+Rootless Podman and Vulkan tooling are not required for the functionality
+currently implemented, but later Pinky stages expect them:
+
+```bash
+sudo apt install -y podman vulkan-tools
+```
+
+The upstream [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
+are the authority for distribution-specific package changes.
+
+### 2. Install Rust and Cargo
+
+Tauri requires Rust. Install the stable toolchain with the official `rustup`
+installer; Cargo is included:
+
+```bash
+curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
+source "$HOME/.cargo/env"
+rustup default stable
+```
+
+You may inspect the installer at <https://sh.rustup.rs> before running it. A new
+terminal normally loads Cargo automatically. If `cargo: command not found`
+appears in the current terminal, run `source "$HOME/.cargo/env"` again.
+
+Verify the installation:
+
+```bash
+rustc --version
+cargo --version
+```
+
+### 3. Install Node.js and project dependencies
+
+Install a supported Node.js LTS release from <https://nodejs.org/> if Node is
+not already present. Pinky requires Node.js 20 or newer.
+
+```bash
+node --version
+npm --version
+
 cd apps/desktop
 npm install
+```
+
+Run `cd apps/desktop` from the root of your Pinky checkout.
+
+The Tauri CLI is already a locked npm development dependency. Do not install a
+second global copy merely to run this project.
+
+### 4. Verify and launch
+
+From the desktop application directory:
+
+```bash
 npm test
 npm run build
+npm run tauri dev
+```
+
+The first native launch may take several minutes while Cargo downloads and
+compiles Rust dependencies. The application window should then open. Pinky
+needs a normal graphical desktop session with D-Bus and Linux Secret Service in
+order to create or unlock its vault.
+
+To run the Rust tests separately from the repository root:
+
+```bash
 cd ../..
 cargo test --workspace
 ```
+
+### Troubleshooting setup
+
+- `cargo: command not found`: install Rust with `rustup`, then run
+  `source "$HOME/.cargo/env"` or open a new terminal.
+- `failed to get cargo metadata: No such file or directory`: Cargo is missing
+  from the environment used to launch npm; fix `PATH` as above.
+- Vault setup reports missing prerequisites: verify `command -v gocryptfs` and
+  `command -v secret-tool` both print paths.
+- Secret Service or keyring errors: launch Pinky inside your logged-in graphical
+  desktop session rather than a bare SSH or headless shell.
+- WebKit, GTK, linker, or `pkg-config` errors: reinstall the native packages in
+  step 1 and compare them with Tauri's current prerequisites page.
 
 With a desktop Secret Service session and `/dev/fuse` access, run the opt-in
 live vault acceptance test with:
 
 ```bash
 cargo test -p pinky-core --test live_onboarding -- --ignored
-```
-
-Run the desktop application with:
-
-```bash
-cd apps/desktop
-npm run tauri dev
 ```
 
 After unlocking the vault, choose **Add source**, enter an approved directory,

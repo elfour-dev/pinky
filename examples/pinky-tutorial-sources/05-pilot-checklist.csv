@@ -1,0 +1,6 @@
+item_id,owner,due_date,status,evidence
+ALDER-10,Priya Nwosu,2026-09-20,complete,collector configuration reviewed
+ALDER-11,Jonah Bell,2026-09-24,in_progress,operator runbook exercise
+ALDER-12,Mira Chen,2026-10-01,pending,security review
+ALDER-13,Jonah Bell,2026-10-08,pending,Northglass response drill
+ALDER-14,Mira Chen,2026-10-18,pending,pilot review and continuation decision

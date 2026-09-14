@@ -1,0 +1,16 @@
+{
+  "project": "Alder",
+  "site": "Northglass",
+  "telemetry_interval_seconds": 30,
+  "alert": {
+    "code": "IRIS417",
+    "flow_threshold_litres_per_minute": 12,
+    "sustained_minutes": 4,
+    "maintenance_suppression": true
+  },
+  "delivery": {
+    "retry_limit": 3,
+    "offline_buffer_minutes": 90
+  },
+  "automatic_valve_control": false
+}

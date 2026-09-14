@@ -1,0 +1,6 @@
+2026-09-12T09:14:00Z INFO  collector site=Northglass zone=A2 flow_lpm=3.1 valve=open
+2026-09-12T09:16:00Z WARN  detector site=Northglass zone=B1 code=IRIS417 flow_lpm=12.8 sustained_minutes=4
+2026-09-12T09:16:02Z INFO  notifier channel=dashboard code=IRIS417 delivered=true
+2026-09-12T09:17:10Z INFO  operator name="Jonah Bell" action=inspect_zone zone=B1
+2026-09-12T09:18:44Z INFO  operator name="Jonah Bell" action=isolate_zone zone=B1 peak_flow_lpm=13.4
+2026-09-12T09:22:03Z INFO  incident code=IRIS417 zone=B1 resolution=confirmed_leak evidence=sunstone
