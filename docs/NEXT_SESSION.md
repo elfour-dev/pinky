@@ -1,6 +1,6 @@
 # Next-session handoff
 
-Recorded: 2026-09-14
+Recorded: 2026-09-15
 
 ## Active objective
 
@@ -29,7 +29,16 @@ R3 implements the strict evidence and answer contract in
 regenerates Pinky-owned citation IDs, quotes source text as untrusted data,
 requires every factual summary and claim to cite supplied evidence, and permits
 only one bounded repair attempt. Empty retrieval returns an explicit gap without
-model inference. Generated text is still neither displayed nor persisted.
+model inference. Generated text is still not persisted as conversation history.
+
+R4 is now implemented on the Ollama-first route. The desktop has explicit
+Ask/Search modes; Ask requires an unlocked vault, at least one retained source,
+and an attached model. Retrieval, evidence assembly, local inference, and R3
+validation run in one cancellable task. Validated summaries and claims render
+with warnings, unresolved gaps, and exact retained-snapshot citation links.
+Invalid, cancelled, detached, timed-out, or unavailable model requests remain
+errors or gaps and cannot update the UI after a newer request. The target-host
+tutorial demonstration is still an opt-in acceptance check.
 
 ## Verification completed
 
@@ -39,7 +48,7 @@ model inference. Generated text is still neither displayed nor persisted.
 - two opt-in live Ollama target-host tests: passed separately
 - opt-in live Secret Service/FUSE and Ollama tests: ignored in the ordinary
   regression suite as designed
-- `npm test`: 3 frontend tests passed
+- `npm test`: 4 frontend tests passed
 - `npm run build`: passed without warnings after deterministic vendor chunking
 - `npm run test:e2e`: passed
 - `git diff --check`: passed
@@ -48,18 +57,12 @@ The deterministic fake llama-server test needs loopback permission; the
 restricted filesystem sandbox returned `EPERM`, and the same suite passed when
 run with explicit local-loopback permission.
 
-## Next implementation slice: R4 visible one-shot cited answers
+## Next implementation slice: R5 encrypted persistent conversations
 
-Wire the accepted R3 contract into the desktop without adding persistence yet:
-
-1. Add explicit Ask and Search modes with honest enablement rules.
-2. Run retrieval and validated inference as one visible cancellable task.
-3. Render the summary, claims, qualifications, gaps, and clickable exact
-   citations only after R3 validation succeeds.
-4. Prevent cancellation, timeout, tunnel loss, and invalid model output from
-   producing a completed or late answer.
-5. Pass the frontend, native, and target-host tutorial gates in
-   `CITED_QA_PHASES.md`.
+Persist validated questions and answers as immutable encrypted conversation
+messages. Keep invalid and cancelled generations out of completed history,
+restore ordering after restart, and add the conversation interactions and
+tests described in `CITED_QA_PHASES.md`.
 
 ## Orientation commands
 

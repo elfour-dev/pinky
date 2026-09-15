@@ -7,11 +7,12 @@ use std::{
 };
 
 use pinky_core::{
-    create_registered_vault, read_registration, unlock_registered_vault, CitationPassage,
-    GocryptfsMount, LlamaClient, LlamaError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget,
-    ObjectStore, OllamaClient, OllamaError, OllamaRuntimeInfo, OnboardedVault, RetrievalService,
-    SearchHit, SourceSummary, SystemVaultPlatform, TaskJournal, TaskManager, VaultPaths,
-    VaultRegistration,
+    answer_question, create_registered_vault, read_registration, unlock_registered_vault,
+    AnswerEnvelopeV1, CitationPassage, GocryptfsMount, InferenceError, InferenceFuture,
+    InferenceProvider, LlamaClient, LlamaError, LocalFileFingerprint, LocalIngestor,
+    LocalWatchTarget, ObjectStore, OllamaClient, OllamaError, OllamaRuntimeInfo, OnboardedVault,
+    RetrievalService, SearchHit, SourceSummary, StructuredGenerationRequest, SystemVaultPlatform,
+    TaskJournal, TaskManager, VaultPaths, VaultRegistration,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -50,16 +51,38 @@ struct RuntimeData {
 }
 
 struct AttachedModel {
-    _client: AttachedModelClient,
+    client: AttachedModelClient,
     provider: &'static str,
     model_name: String,
     context_size: u64,
     total_slots: u64,
 }
 
-struct AttachedModelClient {
-    _llama: Option<LlamaClient>,
-    _ollama: Option<OllamaClient>,
+#[derive(Clone)]
+enum AttachedModelClient {
+    Llama(LlamaClient),
+    Ollama(OllamaClient),
+}
+
+impl InferenceProvider for AttachedModelClient {
+    fn generate_structured<'a>(
+        &'a self,
+        request: &'a StructuredGenerationRequest,
+        cancellation: &'a CancellationToken,
+    ) -> InferenceFuture<'a> {
+        match self {
+            Self::Llama(client) => {
+                let _ = client;
+                Box::pin(async move {
+                    let _ = (request, cancellation);
+                    Err(InferenceError::Unavailable(
+                        "llama-server generation is not enabled in this phase".to_owned(),
+                    ))
+                })
+            }
+            Self::Ollama(client) => client.generate_structured(request, cancellation),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -115,6 +138,11 @@ struct AttachLlamaRequest {
 struct AttachOllamaRequest {
     endpoint: String,
     model: String,
+}
+
+#[derive(Deserialize)]
+struct AskQuestionRequest {
+    question: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,10 +234,7 @@ async fn attach_llama_server(
                         error => error.to_string(),
                     })?;
                 Ok(AttachedModel {
-                    _client: AttachedModelClient {
-                        _llama: Some(client),
-                        _ollama: None,
-                    },
+                    client: AttachedModelClient::Llama(client),
                     provider: "llama-server",
                     model_name: display_model_name(&info.model_path),
                     context_size: info.context_size,
@@ -340,10 +365,7 @@ fn finish_model_attach_state(
 
 fn ollama_attached_model(client: OllamaClient, info: OllamaRuntimeInfo) -> AttachedModel {
     AttachedModel {
-        _client: AttachedModelClient {
-            _llama: None,
-            _ollama: Some(client),
-        },
+        client: AttachedModelClient::Ollama(client),
         provider: "Ollama",
         model_name: info.model_name,
         context_size: info.context_size,
@@ -978,6 +1000,98 @@ async fn search_sources(
 }
 
 #[tauri::command]
+async fn ask_question(
+    request: AskQuestionRequest,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<AnswerEnvelopeV1, String> {
+    let question = request.question;
+    if question.trim().is_empty() {
+        return Err("enter a question".to_owned());
+    }
+    let (retrieval, provider, provider_name, model_name) = {
+        let data = runtime
+            .data
+            .lock()
+            .map_err(|_| "runtime lock is poisoned".to_owned())?;
+        let vault = data
+            .vault
+            .as_ref()
+            .ok_or_else(|| "unlock the encrypted vault before asking a question".to_owned())?;
+        vault
+            .vault
+            .ensure_mounted()
+            .map_err(|error| error.to_string())?;
+        let model = data
+            .attached_model
+            .as_ref()
+            .ok_or_else(|| "attach a local model before asking a question".to_owned())?;
+        (
+            RetrievalService::new(
+                vault.database.clone(),
+                ObjectStore::new(vault.vault.clone()),
+            ),
+            model.client.clone(),
+            model.provider.to_owned(),
+            model.model_name.clone(),
+        )
+    };
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tasks.spawn("cited answer", None, move |mut context| async move {
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "cited answer",
+            Some(0.15),
+            "Retrieving current retained evidence",
+        );
+        let search_question = question.clone();
+        let hits =
+            tauri::async_runtime::spawn_blocking(move || retrieval.search(&search_question, 50))
+                .await
+                .map_err(|error| format!("retrieval worker failed: {error}"))?
+                .map_err(|error| error.to_string())?;
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "cited answer",
+            Some(0.35),
+            format!(
+                "Assembling {} retained evidence passage{}",
+                hits.len(),
+                if hits.len() == 1 { "" } else { "s" }
+            ),
+        );
+        context.progress(
+            "cited answer",
+            Some(0.45),
+            "Generating a source-grounded answer",
+        );
+        let outcome = answer_question(
+            &provider,
+            context.id(),
+            &provider_name,
+            &model_name,
+            &question,
+            hits,
+            &context.cancellation_token(),
+        )
+        .await
+        .map_err(|error| error.to_string());
+        let task_result = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
+        let _ = sender.send(outcome);
+        task_result
+    });
+    receiver
+        .await
+        .map_err(|_| "answer task ended without a result".to_owned())?
+}
+
+#[tauri::command]
 fn open_citation(
     citation_uri: String,
     runtime: State<'_, AppRuntime>,
@@ -1076,6 +1190,7 @@ pub fn run() {
             ingest_local_file,
             list_sources,
             search_sources,
+            ask_question,
             open_citation,
             cancel_task,
             pause_task,
@@ -1223,12 +1338,9 @@ mod desktop_tests {
 
     fn attached_test_model() -> AttachedModel {
         AttachedModel {
-            _client: AttachedModelClient {
-                _llama: None,
-                _ollama: Some(
-                    OllamaClient::connect("http://127.0.0.1:9", "test-model:latest").unwrap(),
-                ),
-            },
+            client: AttachedModelClient::Ollama(
+                OllamaClient::connect("http://127.0.0.1:9", "test-model:latest").unwrap(),
+            ),
             provider: "Ollama",
             model_name: "test-model:latest".into(),
             context_size: 4_096,

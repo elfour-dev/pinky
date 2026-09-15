@@ -52,3 +52,21 @@ export interface CitationPassage extends Omit<SearchHit, "score"> {
   canonical_uri: string;
   mime_type: string;
 }
+export type ClaimSupport = "direct" | "inference" | "disputed";
+export interface AnswerClaim {
+  statement: string;
+  support: ClaimSupport;
+  citations: string[];
+}
+export interface AnswerEnvelope {
+  schema_version: number;
+  summary: string;
+  summary_citations: string[];
+  claims: AnswerClaim[];
+  warnings: string[];
+  unresolved_gaps: string[];
+}
+
+export function canAsk(status: RuntimeStatus, question: string, sourceCount: number): boolean {
+  return status.vault_mounted && status.model_connected && sourceCount > 0 && question.trim().length > 0;
+}

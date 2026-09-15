@@ -6,7 +6,8 @@ import { Terminal } from "@xterm/xterm";
 import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
-import type { AttachLlamaResponse, CitationPassage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import type { AnswerEnvelope, AttachLlamaResponse, CitationPassage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import { canAsk } from "./types";
 
 const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, watcher_error: null, model_attach_in_progress: false, model_connected: false, model_provider: null, model_name: null, model_context_size: null, model_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
@@ -37,6 +38,11 @@ export function App() {
   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
   const [searchError, setSearchError] = useState("");
   const [searching, setSearching] = useState(false);
+  const [mode, setMode] = useState<"search" | "ask">("search");
+  const [answer, setAnswer] = useState<AnswerEnvelope | null>(null);
+  const [askError, setAskError] = useState("");
+  const [asking, setAsking] = useState(false);
+  const askRun = useRef(0);
   const [citation, setCitation] = useState<CitationPassage | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupPaths, setSetupPaths] = useState<VaultPaths>({ cipher_dir: "", mount_dir: "" });
@@ -111,11 +117,27 @@ export function App() {
     const ids = [...demoTimers.keys()]; demoTimers.clear();
     setEvents((current) => [...current, ...ids.map((id) => cancelledPreview(current, id))]);
   };
+  const askEnabled = canAsk(status, message, sources.length);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const query = message.trim();
     if (!query || !IS_TAURI || !status.vault_mounted) return;
-    setSearchError(""); setSearching(true);
+    if (mode === "ask" && !askEnabled) return;
+    setSearchError(""); setAskError("");
+    if (mode === "ask") {
+      const run = ++askRun.current;
+      setAnswer(null); setAsking(true);
+      try {
+        const result = await invoke<AnswerEnvelope>("ask_question", { request: { question: query } });
+        if (run === askRun.current) setAnswer(result);
+      } catch (error) {
+        if (run === askRun.current) setAskError(String(error));
+      } finally {
+        if (run === askRun.current) setAsking(false);
+      }
+      return;
+    }
+    setAnswer(null); setSearching(true);
     try {
       setSearchHits(await invoke<SearchHit[]>("search_sources", { query, limit: 8 }));
     } catch (error) { setSearchError(String(error)); }
@@ -228,18 +250,20 @@ export function App() {
     </aside>
 
     <section className="centre-panel" id="conversation" aria-label="Conversation">
-      <div className="topbar"><div className="crumb">Retained knowledge <ChevronRight size={13} /> <span>Lexical search</span></div><button className="icon-button" aria-label="Search retained sources" title="Search retained sources"><Search size={16} /></button></div>
+      <div className="topbar"><div className="crumb">Retained knowledge <ChevronRight size={13} /> <span>{mode === "ask" ? "Cited answer" : "Lexical search"}</span></div><div className="mode-switch" role="group" aria-label="Conversation mode"><button className={mode === "ask" ? "active" : ""} onClick={() => { setMode("ask"); setSearchHits([]); setSearchError(""); }} aria-pressed={mode === "ask"}>Ask</button><button className={mode === "search" ? "active" : ""} onClick={() => { setMode("search"); setAnswer(null); setAskError(""); }} aria-pressed={mode === "search"}><Search size={13} /> Search</button></div></div>
       <div className="conversation" role="region" aria-label="Conversation and search results" tabIndex={0}>
         <div className="entity-stage"><AsciiEntity state={entityState} reducedMotion={reducedMotion} /><span className={`state-pill ${entityState}`} aria-live="polite"><i /> ALMA · {entityState}</span></div>
         <div className="welcome"><p className="eyebrow">ENCRYPTED · LOCAL · SOURCE-GROUNDED</p><h1>What should we understand<br />or create?</h1><p>Pinky retains approved evidence inside your encrypted vault and shows every operation while it works.</p></div>
         {!status.vault_mounted && (status.vault_registered ? <div className="blocking-question" role="alert"><KeyRound size={19} /><div><strong>{status.setup_in_progress ? "Unlocking your encrypted vault" : "Your registered vault is locked"}</strong><p>{status.unlock_error || "Pinky is retrieving its protected key from Linux Secret Service."}</p></div><button disabled={status.setup_in_progress || !status.prerequisites.gocryptfs || !status.prerequisites.secret_service} onClick={retryUnlock}>{status.setup_in_progress ? "Unlocking…" : "Retry unlock"}</button></div> : <div className="blocking-question" role="alert"><FolderKey size={19} /><div><strong>Set up the encrypted vault to begin</strong><p>Ingestion, conversations, generation, and logs stay disabled until gocryptfs and Secret Service are ready.</p></div><button onClick={openSetup}>Start setup</button></div>)}
-        {status.vault_mounted && !searchHits.length && <div className="capability-notice"><Database size={17} /><div><strong>Encrypted source search is ready</strong><p>Add local text sources, then search their retained passages below. Cited chat will follow when the local model runtime is connected.</p></div><button onClick={openSource}>Add source</button></div>}
-        {searchError && <p className="search-error" role="alert">{searchError}</p>}
+        {status.vault_mounted && mode === "search" && !searchHits.length && <div className="capability-notice"><Database size={17} /><div><strong>Encrypted source search is ready</strong><p>Add local text sources, then search their retained passages below. Ask mode uses the attached local model and cites this retained evidence.</p></div><button onClick={openSource}>Add source</button></div>}
+        {status.vault_mounted && mode === "ask" && !answer && <div className="capability-notice"><MessageSquare size={17} /><div><strong>{status.model_connected ? "Cited answers are ready" : "Attach a local model to ask"}</strong><p>{status.model_connected ? (sources.length ? "Ask a question and Pinky will retrieve, validate, and cite retained passages." : "Add at least one retained source before asking a question.") : "Ask mode never falls back to general knowledge; connect Ollama or llama-server in the runtime panel."}</p></div><button onClick={sources.length ? openModel : openSource}>{sources.length ? "Attach model" : "Add source"}</button></div>}
+        {(searchError || askError) && <p className="search-error" role="alert">{searchError || askError}</p>}
+        {answer && <AnswerView answer={answer} onCitation={(uri) => void showCitation(uri)} />}
         {!!searchHits.length && <section className="search-results" aria-label="Retained source search results"><header><p className="eyebrow">MATCHING EVIDENCE</p><span>{searchHits.length} passage{searchHits.length === 1 ? "" : "s"}</span></header>{searchHits.map((hit) => <article key={hit.chunk_id}><div><FileText size={14} /><strong>{hit.display_name}</strong>{hit.heading && <span>{hit.heading}</span>}</div><p>{hit.passage}</p><button onClick={() => void showCitation(hit.citation_uri)}>{formatCoordinates(hit.coordinates)} · Open retained citation</button></article>)}</section>}
       </div>
       <form className="composer" onSubmit={submit}>
-        <textarea aria-label="Search retained sources" value={message} onChange={(event) => setMessage(event.target.value)} onFocus={() => setListening(true)} onBlur={() => setListening(false)} placeholder={status.vault_mounted ? "Search your retained sources…" : "Unlock the encrypted vault to start…"} disabled={!status.vault_mounted || searching} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-        <div className="composer-footer"><div><button type="button" className="tool-chip" disabled={!status.vault_mounted} onClick={openSource}><Plus size={14} /> Attach source</button><span>{status.vault_mounted ? "Lexical retrieval · exact citations" : "Encrypted vault required"}</span></div><button className="send" aria-label="Search" disabled={!status.vault_mounted || searching || !message.trim()}>{searching ? "…" : "↑"}</button></div>
+        <textarea aria-label={mode === "ask" ? "Ask a cited question" : "Search retained sources"} value={message} onChange={(event) => setMessage(event.target.value)} onFocus={() => setListening(true)} onBlur={() => setListening(false)} placeholder={status.vault_mounted ? (mode === "ask" ? "Ask about your retained evidence…" : "Search your retained sources…") : "Unlock the encrypted vault to start…"} disabled={!status.vault_mounted || searching || asking} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+        <div className="composer-footer"><div><button type="button" className="tool-chip" disabled={!status.vault_mounted} onClick={openSource}><Plus size={14} /> Attach source</button><span>{status.vault_mounted ? (mode === "ask" ? "Local inference · validated citations" : "Lexical retrieval · exact citations") : "Encrypted vault required"}</span></div><button className="send" aria-label={mode === "ask" ? "Ask question" : "Search"} disabled={!status.vault_mounted || searching || asking || !message.trim() || (mode === "ask" && !askEnabled)}>{searching || asking ? "…" : "↑"}</button></div>
       </form>
     </section>
 
@@ -276,7 +300,7 @@ export function App() {
     {modelOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeModel(); }}>
       <section className="setup-modal model-modal" role="dialog" aria-modal="true" aria-labelledby="model-title">
         <header><div><p className="eyebrow">LOCAL INFERENCE</p><h2 id="model-title">Attach local model</h2></div><button aria-label="Close model connection" disabled={modelRunning} onClick={closeModel}><X size={17} /></button></header>
-        {status.model_connected ? <div className="setup-complete"><Cpu size={34} /><h3>{status.model_name}</h3><p>{status.model_provider} model attached with {status.model_context_size?.toLocaleString()} context tokens.</p><p>{status.model_provider === "Ollama" ? "The local Ollama API does not require or store an API key." : "The API key exists only in this Pinky process."} Question answering remains disabled until its evidence contract is implemented.</p>{modelError && <p className="setup-error" role="alert">{modelError}</p>}<button className="disconnect-model" onClick={() => void detachModel()}>Detach model</button></div> : <form onSubmit={attachModel}>
+        {status.model_connected ? <div className="setup-complete"><Cpu size={34} /><h3>{status.model_name}</h3><p>{status.model_provider} model attached with {status.model_context_size?.toLocaleString()} context tokens.</p><p>{status.model_provider === "Ollama" ? "The local Ollama API does not require or store an API key." : "The API key exists only in this Pinky process."} Ask mode will retrieve and validate citations before rendering an answer.</p>{modelError && <p className="setup-error" role="alert">{modelError}</p>}<button className="disconnect-model" onClick={() => void detachModel()}>Detach model</button></div> : <form onSubmit={attachModel}>
           <div className="setup-intro"><Cpu size={21} /><p>{modelProvider === "ollama" ? "Connect to an already-running local Ollama instance without an API key." : "Connect to an already-running llama.cpp server using its ephemeral API key."} Pinky accepts only an IPv4 loopback endpoint.</p></div>
           <label>Provider<select value={modelProvider} onChange={(event) => { const provider = event.target.value as "ollama" | "llama-server"; setModelProvider(provider); setModelEndpoint(provider === "ollama" ? "http://127.0.0.1:11434" : "http://127.0.0.1:8080"); setModelApiKey(""); setModelError(""); }}><option value="ollama">Ollama (no key)</option><option value="llama-server">llama-server (API key)</option></select></label>
           <label>Server endpoint<input type="url" value={modelEndpoint} onChange={(event) => setModelEndpoint(event.target.value)} placeholder={modelProvider === "ollama" ? "http://127.0.0.1:11434" : "http://127.0.0.1:8080"} spellCheck={false} required /></label>
@@ -313,6 +337,22 @@ export function App() {
 function formatCoordinates(coordinates: SearchHit["coordinates"]) {
   if (!coordinates?.line_start) return "Chunk passage";
   return coordinates.line_start === coordinates.line_end ? `Line ${coordinates.line_start}` : `Lines ${coordinates.line_start}–${coordinates.line_end}`;
+}
+
+function AnswerView({ answer, onCitation }: { answer: AnswerEnvelope; onCitation: (uri: string) => void }) {
+  const citations = [...new Set(answer.summary_citations)];
+  return <section className="answer-view" aria-label="Cited answer" aria-live="polite">
+    <header><p className="eyebrow">SOURCE-GROUNDED ANSWER</p><span>validated schema {answer.schema_version}</span></header>
+    <p className="answer-summary">{answer.summary}</p>
+    {!!citations.length && <CitationLinks citations={citations} onCitation={onCitation} label="Summary sources" />}
+    {!!answer.claims.length && <div className="answer-claims">{answer.claims.map((claim, index) => <article key={`${claim.statement}-${index}`}><div className="claim-label"><strong>{claim.support}</strong><span>Claim {index + 1}</span></div><p>{claim.statement}</p><CitationLinks citations={claim.citations} onCitation={onCitation} label="Claim sources" /></article>)}</div>}
+    {!!answer.warnings.length && <div className="answer-notes warning" role="note"><strong>Evidence warnings</strong><ul>{answer.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div>}
+    {!!answer.unresolved_gaps.length && <div className="answer-notes gap" role="note"><strong>Unresolved gaps</strong><ul>{answer.unresolved_gaps.map((gap) => <li key={gap}>{gap}</li>)}</ul></div>}
+  </section>;
+}
+
+function CitationLinks({ citations, onCitation, label }: { citations: string[]; onCitation: (uri: string) => void; label: string }) {
+  return <div className="answer-citations" aria-label={label}>{citations.map((citation) => <button key={citation} onClick={() => onCitation(citation)}>{citation.replace("pinky://", "")}</button>)}</div>;
 }
 
 function NavGroup({ icon, label, count, children }: { icon: React.ReactNode; label: string; count: string; children?: React.ReactNode }) {

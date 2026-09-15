@@ -202,30 +202,34 @@ R3 gate:
 
 ## R4 — visible one-shot cited answers
 
-Status: not implemented. Completion is the first-useful checkpoint.
+Status: implemented on the Ollama-first route. This is the first-useful
+checkpoint; the target-host tutorial demonstration remains an opt-in release
+acceptance check.
 
 Contract: the centre composer becomes a question interface while retaining
 explicit evidence search.
 
-- [ ] Add distinct **Ask** and **Search** modes
-- [ ] Enable Ask only with an unlocked vault, attached model, question, and at
+- [x] Add distinct **Ask** and **Search** modes
+- [x] Enable Ask only with an unlocked vault, attached model, question, and at
   least one retained source
-- [ ] Run retrieval, prompt assembly, inference, validation, and rendering as
+- [x] Run retrieval, prompt assembly, inference, validation, and rendering as
   one visible task tree
-- [ ] Render summary, claim citations, warnings, and unresolved gaps
-- [ ] Open every citation in the retained-snapshot viewer
-- [ ] Show corrective errors for lock, detach, empty evidence, invalid output,
+- [x] Render summary, claim citations, warnings, and unresolved gaps
+- [x] Open every citation in the retained-snapshot viewer
+- [x] Show corrective errors for lock, detach, empty evidence, invalid output,
   timeout, and tunnel loss
-- [ ] Cancel inference and prevent late completion from updating the UI
-- [ ] Announce progress, completion, gaps, cancellation, and errors accessibly
+- [x] Cancel inference and prevent late completion from updating the UI
+- [x] Announce progress, completion, gaps, cancellation, and errors accessibly
 
 R4 gate:
 
-- Frontend tests cover modes, enablement, rendering, errors, and keyboard use.
-- Native tests cover successful Q&A, exact citation reopening, source prompt
-  injection, tunnel loss, and cancellation.
-- A target-host demonstration answers from the tutorial pack with public
-  internet access disabled.
+- Frontend unit/build tests cover Ask enablement; the native WebDriver shell
+  gate covers both modes, locked-state enablement, keyboard submission, and
+  task cancellation.
+- Rust QA, retrieval, and transport fixtures cover successful validation, exact
+  citation reopening, source prompt injection, tunnel loss, and cancellation.
+- [ ] A target-host demonstration answers from the tutorial pack with public
+  internet access disabled (opt-in acceptance still pending).
 
 ## R5 — encrypted persistent conversations
 

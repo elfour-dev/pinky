@@ -95,6 +95,10 @@ try {
   assert.match(await execute("return document.querySelector('.vault-card').textContent"), /Vault locked/);
   assert.equal(await execute("return document.querySelector('button.send').disabled"), true);
   assert.equal(await execute("return document.querySelector('button.new-chat').disabled"), true);
+  assert.equal(await execute("return [...document.querySelectorAll('.mode-switch button')].map((button) => button.textContent.trim()).join('|')"), "Ask|Search");
+  await clickButton("Ask");
+  assert.equal(await execute("return document.querySelector('button.send').disabled"), true);
+  assert.match(await execute("return document.querySelector('.conversation')?.textContent || ''"), /Set up the encrypted vault|registered vault is locked/);
   console.log("PASS native three-region shell");
 
   await clickButton("Start setup");

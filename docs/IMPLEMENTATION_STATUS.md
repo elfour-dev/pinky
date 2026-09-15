@@ -36,7 +36,10 @@ This file is the acceptance ledger for the Pinky implementation specification.
   transport
 - [x] Strict versioned evidence and cited-answer validation contract
 - [ ] Embedding model integration and end-to-end Qdrant vector indexing
-- [ ] Model onboarding, hybrid retrieval, cited chat, claims, and dossiers
+- [x] One-shot cited Q&A over retained lexical evidence with explicit Ask/Search
+  modes, cancellable task events, validated claims, warnings, gaps, and exact
+  citation reopening
+- [ ] Model onboarding, hybrid retrieval, persistent cited chat, claims, and dossiers
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
 - [ ] Workspace snapshots, permissions, Podman tools, and app generation
 - [ ] Image generation, accessibility acceptance, backup, packaging, upgrades
@@ -147,7 +150,17 @@ untrusted-data delimiter. Model output must match a bounded, versioned JSON
 contract; every summary and claim citation must be one of the supplied IDs,
 inferences must be explicit, and malformed or unsupported output receives at
 most one bounded repair attempt. Empty retrieval returns an explicit uncited
-gap without calling the model. No answer is displayed or persisted in R3.
+gap without calling the model.
+
+R4 wires that boundary into the desktop. Ask and Search are explicit modes;
+Ask stays disabled until the vault, a retained source, and an attached local
+model are all available. A single cancellable task reports retrieval,
+evidence assembly, inference, and validation progress. Only validated answers
+render, with clickable summary and claim citations, warning/gap panels, and
+the existing exact retained-snapshot viewer. Cancellation and a per-request
+generation guard prevent late model results from appearing after a stop or
+failure. The target-host tutorial demonstration remains an opt-in acceptance
+check; persistent conversations are R5.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and
