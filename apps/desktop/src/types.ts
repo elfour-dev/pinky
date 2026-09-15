@@ -66,6 +66,32 @@ export interface AnswerEnvelope {
   warnings: string[];
   unresolved_gaps: string[];
 }
+export interface ConversationSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface ConversationMessage {
+  id: string;
+  conversation_id: string;
+  ordinal: number;
+  role: "user" | "assistant";
+  content: string;
+  model: string | null;
+  citations: string[];
+  task_id: string | null;
+  replaces_message_id: string | null;
+  created_at: string;
+}
+export interface ConversationDetail {
+  summary: ConversationSummary;
+  messages: ConversationMessage[];
+}
+export interface AskQuestionResponse {
+  conversation_id: string;
+  answer: AnswerEnvelope;
+}
 
 export function canAsk(status: RuntimeStatus, question: string, sourceCount: number): boolean {
   return status.vault_mounted && status.model_connected && sourceCount > 0 && question.trim().length > 0;

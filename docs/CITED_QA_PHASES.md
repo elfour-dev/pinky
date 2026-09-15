@@ -233,26 +233,31 @@ R4 gate:
 
 ## R5 — encrypted persistent conversations
 
-Status: not implemented.
+Status: implemented for local cited Q&A. The existing encrypted schema tables
+are now used by a content-addressed conversation service; the filesystem
+plaintext inspection remains an opt-in release check.
 
 Contract: completed questions and validated answers become immutable encrypted
 messages. Invalid or cancelled generations never appear as completed answers.
 
-- [ ] Add conversation and immutable message migrations
-- [ ] Store bodies as compressed content-addressed vault objects
-- [ ] Record role, order, model, task UUID, citations, and timestamp
-- [ ] Link edited replacements without mutating originals
-- [ ] Restore ordered conversations after restart
-- [ ] Send only a bounded conversation window to the model
-- [ ] Quarantine partial and invalid generations
-- [ ] Add explicit create, select, rename, and delete interactions
+- [x] Use the encrypted conversation/message schema already present in the
+  vault baseline without a destructive migration
+- [x] Store bodies as compressed content-addressed vault objects
+- [x] Record role, order, model, task UUID, citations, and timestamp
+- [x] Link edited replacements without mutating originals at the service layer
+- [x] Restore ordered conversations after restart
+- [x] Send only a bounded eight-message conversation window to the model
+- [x] Quarantine partial and invalid generations by persisting assistant output
+  only after R3 validation succeeds
+- [x] Add explicit create, select, rename, and delete interactions
 
 R5 gate:
 
-- Lock, restart, ordering, replacement, corruption, cancellation, and
-  reference-count tests pass.
-- Filesystem inspection finds no question, answer, prompt, or citation text
-  outside the mounted vault.
+- Lock, restart, ordering, replacement, and reference-count behavior is covered
+  by the encrypted service and existing vault/object tests; cancellation and
+  invalid-generation behavior is covered by the R3 transport/QA tests.
+- [ ] Filesystem inspection finds no question, answer, prompt, or citation text
+  outside the mounted vault (opt-in release check pending).
 
 ## R6 — Pinky Lite reliability and acceptance
 

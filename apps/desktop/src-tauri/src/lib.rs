@@ -7,12 +7,14 @@ use std::{
 };
 
 use pinky_core::{
-    answer_question, create_registered_vault, read_registration, unlock_registered_vault,
-    AnswerEnvelopeV1, CitationPassage, GocryptfsMount, InferenceError, InferenceFuture,
-    InferenceProvider, LlamaClient, LlamaError, LocalFileFingerprint, LocalIngestor,
-    LocalWatchTarget, ObjectStore, OllamaClient, OllamaError, OllamaRuntimeInfo, OnboardedVault,
-    RetrievalService, SearchHit, SourceSummary, StructuredGenerationRequest, SystemVaultPlatform,
-    TaskJournal, TaskManager, VaultPaths, VaultRegistration,
+    answer_question_with_history, create_registered_vault, read_registration,
+    unlock_registered_vault, AnswerEnvelopeV1, CitationPassage, ClaimSupportV1, ConversationDetail,
+    ConversationService, ConversationSummary, ConversationTurnV1, GocryptfsMount, InferenceError,
+    InferenceFuture, InferenceProvider, LlamaClient, LlamaError, LocalFileFingerprint,
+    LocalIngestor, LocalWatchTarget, MessageDraft, ObjectStore, OllamaClient, OllamaError,
+    OllamaRuntimeInfo, OnboardedVault, RetrievalService, SearchHit, SourceSummary,
+    StructuredGenerationRequest, SystemVaultPlatform, TaskJournal, TaskManager, VaultPaths,
+    VaultRegistration,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -143,6 +145,18 @@ struct AttachOllamaRequest {
 #[derive(Deserialize)]
 struct AskQuestionRequest {
     question: String,
+    conversation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct AskQuestionResponse {
+    conversation_id: Uuid,
+    answer: AnswerEnvelopeV1,
+}
+
+#[derive(Deserialize)]
+struct CreateConversationRequest {
+    title: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -673,6 +687,25 @@ fn retrieval_service(runtime: &AppRuntime) -> Result<RetrievalService, String> {
     ))
 }
 
+fn conversation_service(runtime: &AppRuntime) -> Result<ConversationService, String> {
+    let data = runtime
+        .data
+        .lock()
+        .map_err(|_| "runtime lock is poisoned".to_owned())?;
+    let vault = data
+        .vault
+        .as_ref()
+        .ok_or_else(|| "the encrypted vault is not unlocked".to_owned())?;
+    vault
+        .vault
+        .ensure_mounted()
+        .map_err(|error| error.to_string())?;
+    Ok(ConversationService::new(
+        vault.database.clone(),
+        ObjectStore::new(vault.vault.clone()),
+    ))
+}
+
 struct PendingObservation {
     fingerprint: LocalFileFingerprint,
     first_seen: Instant,
@@ -1004,11 +1037,50 @@ async fn ask_question(
     request: AskQuestionRequest,
     runtime: State<'_, AppRuntime>,
     tasks: State<'_, TaskManager>,
-) -> Result<AnswerEnvelopeV1, String> {
+) -> Result<AskQuestionResponse, String> {
     let question = request.question;
     if question.trim().is_empty() {
         return Err("enter a question".to_owned());
     }
+    let conversations = conversation_service(runtime.inner())?;
+    let conversation_id = match request.conversation_id {
+        Some(id) => {
+            conversations.get(id).map_err(|error| error.to_string())?;
+            id
+        }
+        None => {
+            conversations
+                .create(&conversation_title(&question))
+                .map_err(|error| error.to_string())?
+                .id
+        }
+    };
+    let conversation_history = conversations
+        .get(conversation_id)
+        .map_err(|error| error.to_string())?
+        .messages
+        .into_iter()
+        .rev()
+        .take(pinky_core::MAX_CONVERSATION_MESSAGES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|message| ConversationTurnV1 {
+            role: message.role,
+            content: message.content,
+        })
+        .collect::<Vec<_>>();
+    conversations
+        .append_message(&MessageDraft {
+            conversation_id,
+            role: "user",
+            content: &question,
+            model: None,
+            citations: &[],
+            task_id: None,
+            replaces_message_id: None,
+        })
+        .map_err(|error| error.to_string())?;
     let (retrieval, provider, provider_name, model_name) = {
         let data = runtime
             .data
@@ -1071,24 +1143,153 @@ async fn ask_question(
             Some(0.45),
             "Generating a source-grounded answer",
         );
-        let outcome = answer_question(
+        let cancellation = context.cancellation_token();
+        let outcome = answer_question_with_history(
             &provider,
             context.id(),
             &provider_name,
             &model_name,
             &question,
+            &conversation_history,
             hits,
-            &context.cancellation_token(),
+            &cancellation,
         )
         .await
         .map_err(|error| error.to_string());
+        let outcome = match outcome {
+            Ok(answer) => {
+                let citations = answer
+                    .summary_citations
+                    .iter()
+                    .chain(
+                        answer
+                            .claims
+                            .iter()
+                            .flat_map(|claim| claim.citations.iter()),
+                    )
+                    .cloned()
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                conversations
+                    .append_message(&MessageDraft {
+                        conversation_id,
+                        role: "assistant",
+                        content: &persisted_answer_content(&answer),
+                        model: Some(&model_name),
+                        citations: &citations,
+                        task_id: Some(context.id()),
+                        replaces_message_id: None,
+                    })
+                    .map(|_| answer)
+                    .map_err(|error| format!("validated answer could not be persisted: {error}"))
+            }
+            Err(error) => Err(error),
+        };
         let task_result = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
-        let _ = sender.send(outcome);
+        let _ = sender.send(outcome.map(|answer| AskQuestionResponse {
+            conversation_id,
+            answer,
+        }));
         task_result
     });
     receiver
         .await
         .map_err(|_| "answer task ended without a result".to_owned())?
+}
+
+#[tauri::command]
+fn list_conversations(runtime: State<'_, AppRuntime>) -> Result<Vec<ConversationSummary>, String> {
+    conversation_service(runtime.inner())?
+        .list()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_conversation(
+    request: CreateConversationRequest,
+    runtime: State<'_, AppRuntime>,
+) -> Result<ConversationSummary, String> {
+    conversation_service(runtime.inner())?
+        .create(&request.title)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn rename_conversation(
+    conversation_id: String,
+    request: CreateConversationRequest,
+    runtime: State<'_, AppRuntime>,
+) -> Result<ConversationSummary, String> {
+    let id =
+        Uuid::parse_str(&conversation_id).map_err(|_| "invalid conversation UUID".to_owned())?;
+    conversation_service(runtime.inner())?
+        .rename(id, &request.title)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_conversation(
+    conversation_id: String,
+    runtime: State<'_, AppRuntime>,
+) -> Result<(), String> {
+    let id =
+        Uuid::parse_str(&conversation_id).map_err(|_| "invalid conversation UUID".to_owned())?;
+    conversation_service(runtime.inner())?
+        .delete(id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_conversation(
+    conversation_id: String,
+    runtime: State<'_, AppRuntime>,
+) -> Result<ConversationDetail, String> {
+    let id =
+        Uuid::parse_str(&conversation_id).map_err(|_| "invalid conversation UUID".to_owned())?;
+    conversation_service(runtime.inner())?
+        .get(id)
+        .map_err(|error| error.to_string())
+}
+
+fn conversation_title(question: &str) -> String {
+    let title = question.split_whitespace().collect::<Vec<_>>().join(" ");
+    title.chars().take(72).collect()
+}
+
+fn persisted_answer_content(answer: &AnswerEnvelopeV1) -> String {
+    let mut content = answer.summary.clone();
+    if !answer.claims.is_empty() {
+        content.push_str("\n\nClaims:\n");
+        for claim in &answer.claims {
+            content.push_str("- [");
+            content.push_str(match claim.support {
+                ClaimSupportV1::Direct => "direct",
+                ClaimSupportV1::Inference => "inference",
+                ClaimSupportV1::Disputed => "disputed",
+            });
+            content.push_str("] ");
+            content.push_str(&claim.statement);
+            content.push('\n');
+        }
+    }
+    if !answer.warnings.is_empty() {
+        content.push_str("\nWarnings:\n");
+        for warning in &answer.warnings {
+            content.push_str("- ");
+            content.push_str(warning);
+            content.push('\n');
+        }
+    }
+    if !answer.unresolved_gaps.is_empty() {
+        content.push_str("\nUnresolved gaps:\n");
+        for gap in &answer.unresolved_gaps {
+            content.push_str("- ");
+            content.push_str(gap);
+            content.push('\n');
+        }
+    }
+    content.trim_end().to_owned()
 }
 
 #[tauri::command]
@@ -1191,6 +1392,11 @@ pub fn run() {
             list_sources,
             search_sources,
             ask_question,
+            list_conversations,
+            create_conversation,
+            rename_conversation,
+            delete_conversation,
+            get_conversation,
             open_citation,
             cancel_task,
             pause_task,

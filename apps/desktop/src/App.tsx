@@ -1,12 +1,12 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { BookOpen, Box, ChevronRight, CirclePause, Cpu, Database, FileText, FolderKey, KeyRound, LockKeyhole, MessageSquare, OctagonX, Play, Plus, Search, ShieldCheck, Square, X } from "lucide-react";
+import { BookOpen, Box, ChevronRight, CirclePause, Cpu, Database, FileText, FolderKey, KeyRound, LockKeyhole, MessageSquare, OctagonX, Pencil, Play, Plus, Search, ShieldCheck, Square, Trash2, X } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
-import type { AnswerEnvelope, AttachLlamaResponse, CitationPassage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import type { AnswerEnvelope, AskQuestionResponse, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
 import { canAsk } from "./types";
 
 const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, watcher_error: null, model_attach_in_progress: false, model_connected: false, model_provider: null, model_name: null, model_context_size: null, model_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
@@ -43,6 +43,10 @@ export function App() {
   const [askError, setAskError] = useState("");
   const [asking, setAsking] = useState(false);
   const askRun = useRef(0);
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [conversationMessages, setConversationMessages] = useState<ConversationMessage[]>([]);
+  const [conversationError, setConversationError] = useState("");
   const [citation, setCitation] = useState<CitationPassage | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupPaths, setSetupPaths] = useState<VaultPaths>({ cipher_dir: "", mount_dir: "" });
@@ -66,11 +70,36 @@ export function App() {
   const [reducedMotion, setReducedMotion] = useState(() => matchMedia("(prefers-reduced-motion: reduce)").matches);
   const tasks = useMemo(() => Object.values(events.reduce<Record<string, TaskEvent>>((latest, event) => ({ ...latest, [event.task_id]: event }), {})).sort((a, b) => b.sequence - a.sequence), [events]);
   const entityState = deriveEntityState(tasks, listening);
+  const loadConversation = async (conversationId: string) => {
+    if (!IS_TAURI) return;
+    setConversationError("");
+    try {
+      const detail = await invoke<ConversationDetail>("get_conversation", { conversationId });
+      setActiveConversationId(conversationId);
+      setConversationMessages(detail.messages);
+    } catch (error) { setConversationError(String(error)); }
+  };
+  const refreshConversations = async (preferredId?: string) => {
+    if (!IS_TAURI) return;
+    try {
+      const list = await invoke<ConversationSummary[]>("list_conversations");
+      setConversations(list);
+      const next = preferredId || activeConversationId || list[0]?.id;
+      if (next && list.some((conversation) => conversation.id === next)) await loadConversation(next);
+      else { setActiveConversationId(null); setConversationMessages([]); }
+    } catch (error) { setConversationError(String(error)); }
+  };
 
   useEffect(() => {
     if (IS_TAURI) void invoke<RuntimeStatus>("runtime_status").then((runtime) => {
       setStatus(runtime);
-      if (runtime.vault_mounted) void invoke<SourceSummary[]>("list_sources").then(setSources).catch(() => undefined);
+      if (runtime.vault_mounted) {
+        void invoke<SourceSummary[]>("list_sources").then(setSources).catch(() => undefined);
+        void invoke<ConversationSummary[]>("list_conversations").then((list) => {
+          setConversations(list);
+          if (list[0]) void loadConversation(list[0].id);
+        }).catch(() => undefined);
+      }
     }).catch(() => setStatus(EMPTY_STATUS));
     if (IS_TAURI) void invoke<TaskEvent[]>("task_snapshot").then((snapshot) => setEvents((current) => mergeTaskEvents(current, snapshot))).catch(() => undefined);
     const unlisten = IS_TAURI
@@ -78,6 +107,9 @@ export function App() {
         setEvents((current) => mergeTaskEvents(current, [payload]));
         if (payload.state === "completed" && payload.phase.name === "local ingestion") {
           void invoke<SourceSummary[]>("list_sources").then(setSources).catch(() => undefined);
+        }
+        if (payload.state === "completed" && payload.phase.name === "cited answer") {
+          void refreshConversations();
         }
         if (["completed", "failed", "cancelled"].includes(payload.state) && payload.phase.name === "model attach") {
           void invoke<RuntimeStatus>("runtime_status").then(setStatus).catch(() => undefined);
@@ -96,6 +128,8 @@ export function App() {
   }, [status.setup_in_progress]);
   useEffect(() => {
     if (!IS_TAURI || !status.vault_mounted) return;
+    void invoke<SourceSummary[]>("list_sources").then(setSources).catch(() => undefined);
+    void refreshConversations();
     const timer = window.setInterval(() => void invoke<RuntimeStatus>("runtime_status").then(setStatus).catch(() => undefined), 2_000);
     return () => window.clearInterval(timer);
   }, [status.vault_mounted]);
@@ -128,8 +162,11 @@ export function App() {
       const run = ++askRun.current;
       setAnswer(null); setAsking(true);
       try {
-        const result = await invoke<AnswerEnvelope>("ask_question", { request: { question: query } });
-        if (run === askRun.current) setAnswer(result);
+        const result = await invoke<AskQuestionResponse>("ask_question", { request: { question: query, conversation_id: activeConversationId } });
+        if (run === askRun.current) {
+          setAnswer(result.answer);
+          await refreshConversations(result.conversation_id);
+        }
       } catch (error) {
         if (run === askRun.current) setAskError(String(error));
       } finally {
@@ -148,6 +185,36 @@ export function App() {
     setSearchError("");
     try { setCitation(await invoke<CitationPassage>("open_citation", { citationUri: uri })); }
     catch (error) { setSearchError(String(error)); }
+  };
+  const newConversation = async () => {
+    if (!IS_TAURI || !status.vault_mounted) return;
+    setConversationError("");
+    try {
+      const created = await invoke<ConversationSummary>("create_conversation", { request: { title: "New conversation" } });
+      setMessage(""); setAnswer(null); setMode("ask");
+      await refreshConversations(created.id);
+    } catch (error) { setConversationError(String(error)); }
+  };
+  const renameConversation = async (conversation: ConversationSummary) => {
+    if (!IS_TAURI) return;
+    const title = window.prompt("Conversation title", conversation.title)?.trim();
+    if (!title || title === conversation.title) return;
+    try {
+      await invoke("rename_conversation", { conversationId: conversation.id, request: { title } });
+      await refreshConversations(conversation.id);
+    } catch (error) { setConversationError(String(error)); }
+  };
+  const deleteConversation = async (conversation: ConversationSummary) => {
+    if (!IS_TAURI || !window.confirm(`Delete “${conversation.title}”? Encrypted message references will be removed; backups may still contain them.`)) return;
+    try {
+      await invoke("delete_conversation", { conversationId: conversation.id });
+      const remaining = conversations.filter((item) => item.id !== conversation.id);
+      setConversations(remaining);
+      if (activeConversationId === conversation.id) {
+        setActiveConversationId(null); setConversationMessages([]); setAnswer(null);
+        if (remaining[0]) await loadConversation(remaining[0].id);
+      }
+    } catch (error) { setConversationError(String(error)); }
   };
   const closeSetup = () => {
     if (setupRunning) return;
@@ -239,9 +306,9 @@ export function App() {
     <a className="skip-link" href="#conversation">Skip to conversation</a>
     <aside className="left-panel" aria-label="Knowledge navigation">
       <header className="brand"><span className="brand-mark">P</span><div><strong>PINKY</strong><small>PRIVATE INTELLIGENCE</small></div></header>
-      <button className="new-chat" disabled title="Chat arrives after retrieval and local model setup"><Plus size={15} /> New conversation</button>
+      <button className="new-chat" disabled={!status.vault_mounted} onClick={() => void newConversation()} title={status.vault_mounted ? "Create an encrypted conversation" : "Unlock the vault before creating a conversation"}><Plus size={15} /> New conversation</button>
       <nav>
-        <NavGroup icon={<MessageSquare />} label="Chats" count="0"><p className="empty-nav">No conversations yet</p></NavGroup>
+        <NavGroup icon={<MessageSquare />} label="Chats" count={String(conversations.length)}>{conversations.length ? conversations.map((conversation) => <div className={`chat-row ${conversation.id === activeConversationId ? "active" : ""}`} key={conversation.id}><button className="chat-select" onClick={() => { setMode("ask"); setAnswer(null); void loadConversation(conversation.id); }}><MessageSquare size={12} /><span>{conversation.title}</span></button><button className="chat-action" aria-label={`Rename ${conversation.title}`} title="Rename conversation" onClick={() => void renameConversation(conversation)}><Pencil size={11} /></button><button className="chat-action danger" aria-label={`Delete ${conversation.title}`} title="Delete conversation" onClick={() => void deleteConversation(conversation)}><Trash2 size={11} /></button></div>) : <p className="empty-nav">No conversations yet</p>}{conversationError && <p className="nav-error" role="alert">{conversationError}</p>}</NavGroup>
         <NavGroup icon={<Database />} label="Sources" count={String(sources.length)}><button className="nav-row" disabled={!status.vault_mounted} onClick={openSource}><Plus size={13} /> Add source</button>{sources.map((source) => <div className="source-row" key={source.source_id} title={source.canonical_uri}><FileText size={12} /><div><strong>{source.display_name}</strong><small>{source.state === "active" ? `${source.chunk_count} chunk${source.chunk_count === 1 ? "" : "s"}` : source.state}</small></div></div>)}</NavGroup>
         <NavGroup icon={<BookOpen />} label="Dossiers" count="0" />
         <NavGroup icon={<FolderKey />} label="Workspaces" count="0"><button className="nav-row"><Plus size={13} /> Approve directory</button></NavGroup>
@@ -254,6 +321,7 @@ export function App() {
       <div className="conversation" role="region" aria-label="Conversation and search results" tabIndex={0}>
         <div className="entity-stage"><AsciiEntity state={entityState} reducedMotion={reducedMotion} /><span className={`state-pill ${entityState}`} aria-live="polite"><i /> ALMA · {entityState}</span></div>
         <div className="welcome"><p className="eyebrow">ENCRYPTED · LOCAL · SOURCE-GROUNDED</p><h1>What should we understand<br />or create?</h1><p>Pinky retains approved evidence inside your encrypted vault and shows every operation while it works.</p></div>
+        {!!conversationMessages.length && <ConversationHistory messages={answer ? conversationMessages.slice(0, -1) : conversationMessages} onCitation={(uri) => void showCitation(uri)} />}
         {!status.vault_mounted && (status.vault_registered ? <div className="blocking-question" role="alert"><KeyRound size={19} /><div><strong>{status.setup_in_progress ? "Unlocking your encrypted vault" : "Your registered vault is locked"}</strong><p>{status.unlock_error || "Pinky is retrieving its protected key from Linux Secret Service."}</p></div><button disabled={status.setup_in_progress || !status.prerequisites.gocryptfs || !status.prerequisites.secret_service} onClick={retryUnlock}>{status.setup_in_progress ? "Unlocking…" : "Retry unlock"}</button></div> : <div className="blocking-question" role="alert"><FolderKey size={19} /><div><strong>Set up the encrypted vault to begin</strong><p>Ingestion, conversations, generation, and logs stay disabled until gocryptfs and Secret Service are ready.</p></div><button onClick={openSetup}>Start setup</button></div>)}
         {status.vault_mounted && mode === "search" && !searchHits.length && <div className="capability-notice"><Database size={17} /><div><strong>Encrypted source search is ready</strong><p>Add local text sources, then search their retained passages below. Ask mode uses the attached local model and cites this retained evidence.</p></div><button onClick={openSource}>Add source</button></div>}
         {status.vault_mounted && mode === "ask" && !answer && <div className="capability-notice"><MessageSquare size={17} /><div><strong>{status.model_connected ? "Cited answers are ready" : "Attach a local model to ask"}</strong><p>{status.model_connected ? (sources.length ? "Ask a question and Pinky will retrieve, validate, and cite retained passages." : "Add at least one retained source before asking a question.") : "Ask mode never falls back to general knowledge; connect Ollama or llama-server in the runtime panel."}</p></div><button onClick={sources.length ? openModel : openSource}>{sources.length ? "Attach model" : "Add source"}</button></div>}
@@ -337,6 +405,12 @@ export function App() {
 function formatCoordinates(coordinates: SearchHit["coordinates"]) {
   if (!coordinates?.line_start) return "Chunk passage";
   return coordinates.line_start === coordinates.line_end ? `Line ${coordinates.line_start}` : `Lines ${coordinates.line_start}–${coordinates.line_end}`;
+}
+
+function ConversationHistory({ messages, onCitation }: { messages: ConversationMessage[]; onCitation: (uri: string) => void }) {
+  return <section className="conversation-history" aria-label="Encrypted conversation history">
+    {messages.map((message) => <article className={`message ${message.role}`} key={message.id}><div className="message-label">{message.role === "user" ? "You" : "ALMA"}<time dateTime={message.created_at}>{new Date(message.created_at).toLocaleString()}</time></div><p>{message.content}</p>{message.citations.length > 0 && <CitationLinks citations={message.citations} onCitation={onCitation} label="Message sources" />}</article>)}
+  </section>;
 }
 
 function AnswerView({ answer, onCitation }: { answer: AnswerEnvelope; onCitation: (uri: string) => void }) {

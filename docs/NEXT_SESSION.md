@@ -40,29 +40,37 @@ Invalid, cancelled, detached, timed-out, or unavailable model requests remain
 errors or gaps and cannot update the UI after a newer request. The target-host
 tutorial demonstration is still an opt-in acceptance check.
 
+R5 is now implemented for local cited Q&A. Conversation and message bodies are
+stored as compressed content-addressed objects inside the encrypted vault;
+metadata is ordered and immutable in SQLCipher. The desktop restores chats
+after unlock, sends only the bounded recent history to the model, persists an
+assistant message only after validation, and supports encrypted create/select/
+rename/delete interactions. The direct filesystem plaintext inspection remains
+an opt-in release check.
+
 ## Verification completed
 
 - `cargo fmt --all --check`: passed
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed
-- `cargo test --workspace`: 83 core and 6 desktop tests passed
+- `cargo test --workspace`: 87 core and 6 desktop tests passed
 - two opt-in live Ollama target-host tests: passed separately
 - opt-in live Secret Service/FUSE and Ollama tests: ignored in the ordinary
   regression suite as designed
 - `npm test`: 4 frontend tests passed
 - `npm run build`: passed without warnings after deterministic vendor chunking
-- `npm run test:e2e`: passed
+- `npm run test:e2e`: passed, including locked Ask/Search mode and task controls
 - `git diff --check`: passed
 
 The deterministic fake llama-server test needs loopback permission; the
 restricted filesystem sandbox returned `EPERM`, and the same suite passed when
 run with explicit local-loopback permission.
 
-## Next implementation slice: R5 encrypted persistent conversations
+## Next implementation slice: R6 Pinky Lite reliability and acceptance
 
-Persist validated questions and answers as immutable encrypted conversation
-messages. Keep invalid and cancelled generations out of completed history,
-restore ordering after restart, and add the conversation interactions and
-tests described in `CITED_QA_PHASES.md`.
+Run the offline reliability and release acceptance work described in
+`CITED_QA_PHASES.md`: interrupted-task recovery, reconnect/retry behavior,
+bounded encrypted diagnostics, accessibility acceptance, packaging checks, and
+the clean-account target-host demonstration.
 
 ## Orientation commands
 

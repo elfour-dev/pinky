@@ -4,6 +4,7 @@
 //! for callers to accidentally persist source material outside the encrypted
 //! boundary.
 
+pub mod conversation;
 pub mod database;
 pub mod hybrid;
 pub mod inference;
@@ -21,6 +22,10 @@ pub mod task;
 pub mod task_journal;
 pub mod vault;
 
+pub use conversation::{
+    ConversationDetail, ConversationError, ConversationMessage, ConversationService,
+    ConversationSummary, MessageDraft,
+};
 pub use database::{Database, DatabaseError};
 pub use hybrid::{
     reciprocal_rank_fusion, FusedChunk, RankedChunk, MAX_CHUNKS_PER_SOURCE_VERSION, RRF_K,
@@ -46,9 +51,10 @@ pub use onboarding::{
 };
 pub use process::{ProcessError, ProcessOutcome, ProcessSupervisor, ProcessTermination};
 pub use qa::{
-    answer_question, select_evidence, validate_answer, AnswerClaimV1, AnswerEnvelopeV1,
-    ClaimSupportV1, EvidenceV1, QaError, QuestionLimitsV1, QuestionRequestV1, MAX_ANSWER_CLAIMS,
-    MAX_CHUNKS_PER_EVIDENCE_VERSION, MAX_EVIDENCE_CHUNKS, MAX_EVIDENCE_TOKENS, QA_SCHEMA_VERSION,
+    answer_question, answer_question_with_history, select_evidence, validate_answer, AnswerClaimV1,
+    AnswerEnvelopeV1, ClaimSupportV1, ConversationTurnV1, EvidenceV1, QaError, QuestionLimitsV1,
+    QuestionRequestV1, MAX_ANSWER_CLAIMS, MAX_CHUNKS_PER_EVIDENCE_VERSION, MAX_CONVERSATION_BYTES,
+    MAX_CONVERSATION_MESSAGES, MAX_EVIDENCE_CHUNKS, MAX_EVIDENCE_TOKENS, QA_SCHEMA_VERSION,
 };
 pub use qdrant::{
     QdrantClient, QdrantError, QdrantLaunchConfig, QdrantSidecar, VectorMatch, VectorPoint,

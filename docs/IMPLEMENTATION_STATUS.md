@@ -39,7 +39,10 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] One-shot cited Q&A over retained lexical evidence with explicit Ask/Search
   modes, cancellable task events, validated claims, warnings, gaps, and exact
   citation reopening
-- [ ] Model onboarding, hybrid retrieval, persistent cited chat, claims, and dossiers
+- [ ] Model onboarding, hybrid retrieval, hybrid cited chat, claims, and dossiers
+- [x] Encrypted persistent conversations with immutable ordered messages,
+  bounded history, validated-answer persistence, and create/select/rename/delete
+  desktop interactions
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
 - [ ] Workspace snapshots, permissions, Podman tools, and app generation
 - [ ] Image generation, accessibility acceptance, backup, packaging, upgrades
@@ -161,6 +164,17 @@ the existing exact retained-snapshot viewer. Cancellation and a per-request
 generation guard prevent late model results from appearing after a stop or
 failure. The target-host tutorial demonstration remains an opt-in acceptance
 check; persistent conversations are R5.
+
+R5 adds the encrypted conversation service over the existing SQLCipher schema.
+Conversation and message metadata remain in the vault database; user and
+assistant bodies are compressed, content-addressed vault objects whose
+reference counts are updated transactionally. Messages are immutable and
+ordered, preserve model/citation/task metadata, and support replacement links.
+The desktop restores conversations after unlock, limits model history to the
+last eight messages, persists an assistant message only after R3 validation,
+and exposes encrypted create/select/rename/delete controls. Invalid or
+cancelled inference never creates a completed assistant message. A direct
+filesystem plaintext inspection remains a release acceptance check.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and
