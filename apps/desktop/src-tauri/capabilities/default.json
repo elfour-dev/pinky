@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal capability for the primary Pinky window",
+  "description": "Capabilities for the primary Pinky window",
   "windows": ["main"],
   "permissions": ["core:default"]
 }

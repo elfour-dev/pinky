@@ -228,14 +228,14 @@ R4 gate:
   task cancellation.
 - Rust QA, retrieval, and transport fixtures cover successful validation, exact
   citation reopening, source prompt injection, tunnel loss, and cancellation.
-- [ ] A target-host demonstration answers from the tutorial pack with public
-  internet access disabled (opt-in acceptance still pending).
+- [x] A target-host demonstration answers from the tutorial pack with public
+  internet access disabled; the full live acceptance is recorded under R6.
 
 ## R5 — encrypted persistent conversations
 
 Status: implemented for local cited Q&A. The existing encrypted schema tables
 are now used by a content-addressed conversation service; the filesystem
-plaintext inspection remains an opt-in release check.
+plaintext inspection passed in the R6 acceptance run.
 
 Contract: completed questions and validated answers become immutable encrypted
 messages. Invalid or cancelled generations never appear as completed answers.
@@ -256,13 +256,15 @@ R5 gate:
 - Lock, restart, ordering, replacement, and reference-count behavior is covered
   by the encrypted service and existing vault/object tests; cancellation and
   invalid-generation behavior is covered by the R3 transport/QA tests.
-- [ ] Filesystem inspection finds no question, answer, prompt, or citation text
-  outside the mounted vault (opt-in release check pending).
+- [x] Filesystem inspection finds no question, answer, prompt, or citation text
+  outside the mounted vault; the application-data and cache roots were scanned
+  on 2026-09-15.
 
 ## R6 — Pinky Lite reliability and acceptance
 
-Status: reliability implementation complete; release acceptance remains
-pending the opt-in clean-account and offline target-host checks.
+Status: reliability implementation, deterministic offline acceptance, and the
+configured target-host cited-conversation check are complete. Direct profile
+inspection is clean; the operator-only SSH process-boundary review remains.
 
 Contract: cited local Q&A remains trustworthy through restarts, failures,
 unsupported questions, and public-internet disconnection.
@@ -272,9 +274,25 @@ unsupported questions, and public-internet disconnection.
 - [x] Detect model/tunnel disconnection and present a reconnect path
 - [x] Retain bounded encrypted diagnostics
 - [x] Provide keyboard, screen-reader, reduced-motion, and non-WebGL paths
-- [ ] Cover the Ollama configuration in packaging and clean-account tests
+- [x] Verify a clean desktop profile starts without a persisted model attachment
+- [x] Verify the configured Ollama target host through the full offline scenario
+
+The target-host check is executable as the ignored
+`completes_project_alder_cited_conversation_without_web_fetches` test in
+`crates/pinky-core/tests/live_ollama.rs`. On 2026-09-15 it passed all three
+ignored checks against Ollama `qwen3.5:4b` through an explicit loopback
+endpoint. The endpoint was temporarily forwarded to the configured local
+Ollama host because this shell did not have the user's SSH credentials; no
+public-web fetches are made by this scenario.
 
 Acceptance scenario:
+
+The deterministic offline core acceptance test first ingests the Project Alder
+tutorial pack, retrieves retained evidence, validates a cited answer through a
+local fixture provider, reopens its exact citation, and restores the encrypted
+conversation after reopening the database. It also verifies that an empty
+retrieval returns an explicit gap without an inference call and that a
+pre-cancelled request cannot create an assistant message.
 
 1. Disconnect public internet access.
 2. Unlock a clean vault and ingest the Project Alder tutorial sources.
@@ -289,17 +307,46 @@ Acceptance scenario:
 R6 gate:
 
 - [x] All R0-R5 automated gates pass.
-- [ ] The recorded target-host scenario passes without public internet.
-- [ ] No direct LAN/external model address, cloud-backed model, orphaned request,
-  or plaintext conversation artifact is found (release inspection pending).
+- [x] Deterministic offline Pinky Lite core acceptance passes.
+- [x] Pinned clean-Debian install starts with a fresh profile and no model
+  attachment.
+- [x] The recorded target-host scenario passes without public internet.
+- [x] The app process used an explicit loopback model endpoint, the temporary
+  test forward and child processes were stopped, and no plaintext markers were
+  found in the application-data or cache roots outside the mounted vault.
+- [ ] Repeat the process-boundary check through the user's authenticated SSH
+  tunnel on the target host; SSH credentials were unavailable in this shell.
 
 ## R7 — retrieval quality upgrade
 
-Status: deferred until Pinky Lite.
+Status: core contracts, encrypted desktop onboarding, and an opt-in
+session-managed bridge are implemented; signed artifact and live acceptance
+gates remain.
 
-- Install and verify the signed embedding model and Qdrant executable.
-- Backfill embeddings from retained text without rereading originals.
-- Combine lexical and vector results through reciprocal-rank fusion.
+- [x] Add a bounded provider-neutral embedding contract and Ollama `/api/embed`
+  transport with cancellation, response limits, model identity, and vector
+  validation.
+- [x] Validate a separate local Ollama embedding model and run a bounded smoke
+  embedding before it can be used for indexing.
+- [x] Add a batched retained-chunk embedding indexer that validates dimensions
+  and upserts normalized vectors into the authenticated Qdrant client.
+- [x] Add citation-preserving lexical/vector fusion with the existing RRF
+  source-version cap.
+- [x] Add cancellable core hybrid-search orchestration that embeds the query,
+  queries Qdrant, and merges vector-only retained hits without losing citations.
+- [x] Load current retained chunks from encrypted objects for embedding backfill
+  without rereading original source files.
+- [x] Add an opt-in desktop bridge that validates the embedding model, lazily
+  starts one supervised Qdrant sidecar per application session, backfills and
+  queries hybrid retrieval, reports retrieval phases, and retains lexical
+  fallback when the bridge is not configured.
+- [ ] Install and verify the signed embedding model and Qdrant executable.
+- [ ] Run the retained-chunk backfill against a verified embedding model and
+  Qdrant sidecar.
+- [x] Add normal desktop onboarding, persistent encrypted configuration, and
+  idle-managed sidecar shutdown.
+- [x] Add a strict signed artifact manifest verifier with HTTPS, metadata,
+  Ed25519, size, digest, and atomic-install checks.
 - Add reranking, relevance fixtures, and warm p95 performance acceptance.
 
 ## Parallel and deferred tracks

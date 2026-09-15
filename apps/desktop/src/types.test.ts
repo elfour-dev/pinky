@@ -17,6 +17,8 @@ const status: RuntimeStatus = {
   model_name: "local",
   model_context_size: 4096,
   model_error: null,
+  hybrid_configured: false,
+  hybrid_model: null,
   prerequisites: {},
 };
 

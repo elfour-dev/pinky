@@ -1,17 +1,24 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { BookOpen, Box, ChevronRight, CirclePause, Cpu, Database, FileText, FolderKey, KeyRound, LockKeyhole, MessageSquare, OctagonX, Pencil, Play, Plus, Search, ShieldCheck, Square, Trash2, X } from "lucide-react";
+import { BookOpen, Box, ChevronRight, CirclePause, Cpu, Database, FileText, FolderKey, KeyRound, LockKeyhole, MessageSquare, OctagonX, Pencil, Play, Plus, Search, Settings2, ShieldCheck, Sparkles, Square, Trash2, X } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
 import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
 import { isReconnectableError } from "./reliability";
-import type { AnswerEnvelope, AskQuestionResponse, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import type { AnswerEnvelope, AskQuestionResponse, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, HybridConfiguration, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import type { EntityState } from "./entity";
 import { canAsk } from "./types";
 
-const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, watcher_error: null, model_attach_in_progress: false, model_connected: false, model_provider: null, model_name: null, model_context_size: null, model_error: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
+const EMPTY_STATUS: RuntimeStatus = { vault_mounted: false, setup_in_progress: false, vault_registered: false, vault_id: null, unlock_error: null, task_journal_error: null, watcher_error: null, model_attach_in_progress: false, model_connected: false, model_provider: null, model_name: null, model_context_size: null, model_error: null, hybrid_configured: false, hybrid_model: null, prerequisites: { gocryptfs: false, podman: false, vulkan: false, secret_service: false } };
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
+const ENTITY_STATES: EntityState[] = ["idle", "listening", "thinking", "researching", "creating", "waiting", "cancelling", "error", "completed"];
+
+function taskAge(timestamp: string, now: number): string {
+  const seconds = Math.max(0, Math.floor((now - Date.parse(timestamp)) / 1000));
+  return seconds === 0 ? "updated now" : `updated ${seconds}s ago`;
+}
 
 function ActivityTerminal({ events }: { events: TaskEvent[] }) {
   const target = useRef<HTMLDivElement>(null);
@@ -67,31 +74,54 @@ export function App() {
   const [modelApiKey, setModelApiKey] = useState("");
   const [modelError, setModelError] = useState("");
   const [modelRunning, setModelRunning] = useState(false);
+  const [hybridOpen, setHybridOpen] = useState(false);
+  const [hybridExecutable, setHybridExecutable] = useState("");
+  const [hybridEndpoint, setHybridEndpoint] = useState("http://127.0.0.1:11434");
+  const [hybridModel, setHybridModel] = useState("nomic-embed-text");
+  const [hybridError, setHybridError] = useState("");
+  const [hybridRunning, setHybridRunning] = useState(false);
   const [listening, setListening] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(() => matchMedia("(prefers-reduced-motion: reduce)").matches);
   const tasks = useMemo(() => Object.values(events.reduce<Record<string, TaskEvent>>((latest, event) => ({ ...latest, [event.task_id]: event }), {})).sort((a, b) => b.sequence - a.sequence), [events]);
-  const entityState = deriveEntityState(tasks, listening);
-  const loadConversation = async (conversationId: string) => {
+  const [clock, setClock] = useState(() => Date.now());
+  const [expressionDebugEnabled, setExpressionDebugEnabled] = useState(false);
+  const [debugExpression, setDebugExpression] = useState<EntityState | null>(null);
+  const liveEntityState = deriveEntityState(tasks, listening);
+  const entityState = debugExpression ?? liveEntityState;
+  useEffect(() => {
+    if (!tasks.length) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [tasks.length]);
+  const loadConversation = async (conversationId: string, expectedAskRun?: number) => {
     if (!IS_TAURI) return;
+    if (expectedAskRun !== undefined && expectedAskRun !== askRun.current) return;
     setConversationError("");
     try {
       const detail = await invoke<ConversationDetail>("get_conversation", { conversationId });
+      if (expectedAskRun !== undefined && expectedAskRun !== askRun.current) return;
       setActiveConversationId(conversationId);
       setConversationMessages(detail.messages);
-    } catch (error) { setConversationError(String(error)); }
+    } catch (error) {
+      if (expectedAskRun === undefined || expectedAskRun === askRun.current) setConversationError(String(error));
+    }
   };
-  const refreshConversations = async (preferredId?: string) => {
+  const refreshConversations = async (preferredId?: string, expectedAskRun?: number) => {
     if (!IS_TAURI) return;
     try {
       const list = await invoke<ConversationSummary[]>("list_conversations");
+      if (expectedAskRun !== undefined && expectedAskRun !== askRun.current) return;
       setConversations(list);
       const next = preferredId || activeConversationId || list[0]?.id;
-      if (next && list.some((conversation) => conversation.id === next)) await loadConversation(next);
+      if (next && list.some((conversation) => conversation.id === next)) await loadConversation(next, expectedAskRun);
       else { setActiveConversationId(null); setConversationMessages([]); }
-    } catch (error) { setConversationError(String(error)); }
+    } catch (error) {
+      if (expectedAskRun === undefined || expectedAskRun === askRun.current) setConversationError(String(error));
+    }
   };
 
   useEffect(() => {
+    if (IS_TAURI) void invoke<boolean>("expression_debug_enabled").then(setExpressionDebugEnabled).catch(() => setExpressionDebugEnabled(false));
     if (IS_TAURI) void invoke<RuntimeStatus>("runtime_status").then((runtime) => {
       setStatus(runtime);
       if (runtime.vault_mounted) {
@@ -153,6 +183,21 @@ export function App() {
     setEvents((current) => [...current, ...ids.map((id) => cancelledPreview(current, id))]);
   };
   const askEnabled = canAsk(status, message, sources.length);
+  const invalidateAskView = () => {
+    askRun.current += 1;
+    setAsking(false);
+  };
+  const selectConversation = (conversationId: string) => {
+    invalidateAskView();
+    setMessage("");
+    setAnswer(null);
+    setSearchHits([]);
+    setAskError("");
+    setSearchError("");
+    setConversationError("");
+    setCitation(null);
+    void loadConversation(conversationId);
+  };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const query = message.trim();
@@ -166,10 +211,17 @@ export function App() {
         const result = await invoke<AskQuestionResponse>("ask_question", { request: { question: query, conversation_id: activeConversationId } });
         if (run === askRun.current) {
           setAnswer(result.answer);
-          await refreshConversations(result.conversation_id);
+          await refreshConversations(result.conversation_id, run);
         }
       } catch (error) {
-        if (run === askRun.current) setAskError(String(error));
+        if (run === askRun.current) {
+          setAskError(String(error));
+          setAsking(false);
+          // The backend records the user message before inference begins. Reload
+          // the conversation so a failed first request can still be continued
+          // instead of leaving the newly-created chat orphaned from the UI.
+          await refreshConversations(undefined, run);
+        }
       } finally {
         if (run === askRun.current) setAsking(false);
       }
@@ -189,12 +241,24 @@ export function App() {
   };
   const newConversation = async () => {
     if (!IS_TAURI || !status.vault_mounted) return;
+    invalidateAskView();
     setConversationError("");
+    setAskError("");
+    setSearchError("");
+    setCitation(null);
+    setAnswer(null);
+    setSearchHits([]);
+    setMessage("");
+    setActiveConversationId(null);
+    setConversationMessages([]);
     try {
       const created = await invoke<ConversationSummary>("create_conversation", { request: { title: "New conversation" } });
-      setMessage(""); setAnswer(null); setMode("ask");
+      setMode("ask");
       await refreshConversations(created.id);
-    } catch (error) { setConversationError(String(error)); }
+    } catch (error) {
+      setConversationError(String(error));
+      await refreshConversations();
+    }
   };
   const renameConversation = async (conversation: ConversationSummary) => {
     if (!IS_TAURI) return;
@@ -302,14 +366,49 @@ export function App() {
       closeModel();
     } catch (error) { setModelError(String(error)); }
   };
+  const openHybrid = async () => {
+    setHybridError(""); setHybridOpen(true);
+    if (!IS_TAURI) return;
+    const configuration = await invoke<HybridConfiguration | null>("get_hybrid_configuration").catch(() => null);
+    if (configuration) {
+      setHybridExecutable(configuration.qdrant_executable);
+      setHybridEndpoint(configuration.embedding_endpoint);
+      setHybridModel(configuration.embedding_model);
+    }
+  };
+  const closeHybrid = () => { if (!hybridRunning) { setHybridError(""); setHybridOpen(false); } };
+  const configureHybrid = async (event: FormEvent) => {
+    event.preventDefault(); setHybridError("");
+    if (!IS_TAURI) { setHybridError("Hybrid retrieval configuration is available only in the native application."); return; }
+    setHybridRunning(true);
+    try {
+      await invoke("configure_hybrid_retrieval", { request: { qdrant_executable: hybridExecutable.trim(), embedding_endpoint: hybridEndpoint.trim(), embedding_model: hybridModel.trim() } });
+      setStatus(await invoke<RuntimeStatus>("runtime_status"));
+      setHybridOpen(false);
+    } catch (error) { setHybridError(String(error)); }
+    finally { setHybridRunning(false); }
+  };
+  const clearHybrid = async () => {
+    if (!IS_TAURI) return;
+    setHybridError(""); setHybridRunning(true);
+    try {
+      await invoke("clear_hybrid_configuration");
+      setStatus(await invoke<RuntimeStatus>("runtime_status"));
+      setHybridOpen(false);
+    } catch (error) { setHybridError(String(error)); }
+    finally { setHybridRunning(false); }
+  };
+  const openAmbient = () => {
+    if (IS_TAURI) void invoke("open_ambient_window").catch(() => undefined);
+  };
 
   return <main className="app-shell">
     <a className="skip-link" href="#conversation">Skip to conversation</a>
     <aside className="left-panel" aria-label="Knowledge navigation">
       <header className="brand"><span className="brand-mark">P</span><div><strong>PINKY</strong><small>PRIVATE INTELLIGENCE</small></div></header>
       <button className="new-chat" disabled={!status.vault_mounted} onClick={() => void newConversation()} title={status.vault_mounted ? "Create an encrypted conversation" : "Unlock the vault before creating a conversation"}><Plus size={15} /> New conversation</button>
-      <nav>
-        <NavGroup icon={<MessageSquare />} label="Chats" count={String(conversations.length)}>{conversations.length ? conversations.map((conversation) => <div className={`chat-row ${conversation.id === activeConversationId ? "active" : ""}`} key={conversation.id}><button className="chat-select" onClick={() => { setMode("ask"); setAnswer(null); void loadConversation(conversation.id); }}><MessageSquare size={12} /><span>{conversation.title}</span></button><button className="chat-action" aria-label={`Rename ${conversation.title}`} title="Rename conversation" onClick={() => void renameConversation(conversation)}><Pencil size={11} /></button><button className="chat-action danger" aria-label={`Delete ${conversation.title}`} title="Delete conversation" onClick={() => void deleteConversation(conversation)}><Trash2 size={11} /></button></div>) : <p className="empty-nav">No conversations yet</p>}{conversationError && <p className="nav-error" role="alert">{conversationError}</p>}</NavGroup>
+        <nav>
+        <NavGroup icon={<MessageSquare />} label="Chats" count={String(conversations.length)}>{conversations.length ? conversations.map((conversation) => <div className={`chat-row ${conversation.id === activeConversationId ? "active" : ""}`} key={conversation.id}><button className="chat-select" onClick={() => { setMode("ask"); selectConversation(conversation.id); }}><MessageSquare size={12} /><span>{conversation.title}</span></button><button className="chat-action" aria-label={`Rename ${conversation.title}`} title="Rename conversation" onClick={() => void renameConversation(conversation)}><Pencil size={11} /></button><button className="chat-action danger" aria-label={`Delete ${conversation.title}`} title="Delete conversation" onClick={() => void deleteConversation(conversation)}><Trash2 size={11} /></button></div>) : <p className="empty-nav">No conversations yet</p>}{conversationError && <p className="nav-error" role="alert">{conversationError}</p>}</NavGroup>
         <NavGroup icon={<Database />} label="Sources" count={String(sources.length)}><button className="nav-row" disabled={!status.vault_mounted} onClick={openSource}><Plus size={13} /> Add source</button>{sources.map((source) => <div className="source-row" key={source.source_id} title={source.canonical_uri}><FileText size={12} /><div><strong>{source.display_name}</strong><small>{source.state === "active" ? `${source.chunk_count} chunk${source.chunk_count === 1 ? "" : "s"}` : source.state}</small></div></div>)}</NavGroup>
         <NavGroup icon={<BookOpen />} label="Dossiers" count="0" />
         <NavGroup icon={<FolderKey />} label="Workspaces" count="0"><button className="nav-row"><Plus size={13} /> Approve directory</button></NavGroup>
@@ -318,15 +417,25 @@ export function App() {
     </aside>
 
     <section className="centre-panel" id="conversation" aria-label="Conversation">
-      <div className="topbar"><div className="crumb">Retained knowledge <ChevronRight size={13} /> <span>{mode === "ask" ? "Cited answer" : "Lexical search"}</span></div><div className="mode-switch" role="group" aria-label="Conversation mode"><button className={mode === "ask" ? "active" : ""} onClick={() => { setMode("ask"); setSearchHits([]); setSearchError(""); }} aria-pressed={mode === "ask"}>Ask</button><button className={mode === "search" ? "active" : ""} onClick={() => { setMode("search"); setAnswer(null); setAskError(""); }} aria-pressed={mode === "search"}><Search size={13} /> Search</button></div></div>
+      <div className="topbar"><div className="crumb">Retained knowledge <ChevronRight size={13} /> <span>{mode === "ask" ? "Cited answer" : "Lexical search"}</span></div><div className="topbar-actions"><button type="button" className="ambient-launcher" onClick={openAmbient} disabled={!IS_TAURI} title="Open Ambient ALMA"><Sparkles size={13} /> Ambient</button><div className="mode-switch" role="group" aria-label="Conversation mode"><button className={mode === "ask" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("ask"); setSearchHits([]); setSearchError(""); }} aria-pressed={mode === "ask"}>Ask</button><button className={mode === "search" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("search"); setAnswer(null); setAskError(""); }} aria-pressed={mode === "search"}><Search size={13} /> Search</button></div></div></div>
       <div className="conversation" role="region" aria-label="Conversation and search results" tabIndex={0}>
         <div className="entity-stage"><AsciiEntity state={entityState} reducedMotion={reducedMotion} /><span className={`state-pill ${entityState}`} aria-live="polite"><i /> ALMA · {entityState}</span></div>
+        {expressionDebugEnabled && <details className="expression-lab" open={debugExpression !== null}>
+          <summary>Temporary expression lab{debugExpression ? ` · ${debugExpression}` : ""}</summary>
+          <div className="expression-lab-body">
+            <p>Preview each ALMA state without starting a real task.</p>
+            <div className="expression-grid" role="group" aria-label="ALMA expression preview">
+              {ENTITY_STATES.map((expression) => <button type="button" key={expression} className={entityState === expression && debugExpression ? "active" : ""} onClick={() => setDebugExpression(expression)} aria-pressed={entityState === expression && debugExpression !== null}>{expression}</button>)}
+            </div>
+            <button type="button" className="expression-live" onClick={() => setDebugExpression(null)} disabled={debugExpression === null}>Return to live task state</button>
+          </div>
+        </details>}
         <div className="welcome"><p className="eyebrow">ENCRYPTED · LOCAL · SOURCE-GROUNDED</p><h1>What should we understand<br />or create?</h1><p>Pinky retains approved evidence inside your encrypted vault and shows every operation while it works.</p></div>
         {!!conversationMessages.length && <ConversationHistory messages={answer ? conversationMessages.slice(0, -1) : conversationMessages} onCitation={(uri) => void showCitation(uri)} />}
         {!status.vault_mounted && (status.vault_registered ? <div className="blocking-question" role="alert"><KeyRound size={19} /><div><strong>{status.setup_in_progress ? "Unlocking your encrypted vault" : "Your registered vault is locked"}</strong><p>{status.unlock_error || "Pinky is retrieving its protected key from Linux Secret Service."}</p></div><button disabled={status.setup_in_progress || !status.prerequisites.gocryptfs || !status.prerequisites.secret_service} onClick={retryUnlock}>{status.setup_in_progress ? "Unlocking…" : "Retry unlock"}</button></div> : <div className="blocking-question" role="alert"><FolderKey size={19} /><div><strong>Set up the encrypted vault to begin</strong><p>Ingestion, conversations, generation, and logs stay disabled until gocryptfs and Secret Service are ready.</p></div><button onClick={openSetup}>Start setup</button></div>)}
         {status.vault_mounted && mode === "search" && !searchHits.length && <div className="capability-notice"><Database size={17} /><div><strong>Encrypted source search is ready</strong><p>Add local text sources, then search their retained passages below. Ask mode uses the attached local model and cites this retained evidence.</p></div><button onClick={openSource}>Add source</button></div>}
         {status.vault_mounted && mode === "ask" && !answer && <div className="capability-notice"><MessageSquare size={17} /><div><strong>{status.model_connected ? "Cited answers are ready" : "Attach a local model to ask"}</strong><p>{status.model_connected ? (sources.length ? "Ask a question and Pinky will retrieve, validate, and cite retained passages." : "Add at least one retained source before asking a question.") : "Ask mode never falls back to general knowledge; connect Ollama or llama-server in the runtime panel."}</p></div><button onClick={sources.length ? openModel : openSource}>{sources.length ? "Attach model" : "Add source"}</button></div>}
-        {(searchError || askError) && <div className="error-panel" role="alert"><p className="search-error">{searchError || askError}</p>{askError && isReconnectableError(askError) && <button className="reconnect-button" onClick={openModel}><Cpu size={13} /> Reconnect local model</button>}</div>}
+        {(searchError || askError) && <div className="error-panel" role="alert"><p className="search-error">{searchError || askError}</p><div className="error-actions">{askError && isReconnectableError(askError) && <button className="reconnect-button" onClick={openModel}><Cpu size={13} /> Reconnect local model</button>}{askError && <button className="reconnect-button" onClick={() => void newConversation()}>New conversation</button>}<button className="reconnect-button" onClick={() => { setSearchError(""); setAskError(""); }}>Dismiss</button></div></div>}
         {answer && <AnswerView answer={answer} onCitation={(uri) => void showCitation(uri)} />}
         {!!searchHits.length && <section className="search-results" aria-label="Retained source search results"><header><p className="eyebrow">MATCHING EVIDENCE</p><span>{searchHits.length} passage{searchHits.length === 1 ? "" : "s"}</span></header>{searchHits.map((hit) => <article key={hit.chunk_id}><div><FileText size={14} /><strong>{hit.display_name}</strong>{hit.heading && <span>{hit.heading}</span>}</div><p>{hit.passage}</p><button onClick={() => void showCitation(hit.citation_uri)}>{formatCoordinates(hit.coordinates)} · Open retained citation</button></article>)}</section>}
       </div>
@@ -342,13 +451,13 @@ export function App() {
         {!tasks.length && <div className="empty-tasks"><Box size={30} /><strong>No active operations</strong><p>Ingestion, research, generation, and tool work will appear here.</p><button onClick={startCheck}><Play size={13} /> Run system check</button></div>}
         {tasks.map((task) => <article className={`task-card ${task.state}`} key={task.task_id}>
           <div className="task-title"><i /><div><strong>{task.phase.name}</strong><small>{task.phase.activity}</small></div><span>{task.phase.progress == null ? "—" : `${Math.round(task.phase.progress * 100)}%`}</span></div>
-          {task.phase.progress != null && <div className="progress"><span style={{ width: `${task.phase.progress * 100}%` }} /></div>}
-          <div className="task-meta"><span>{task.permission_state}</span><span>{task.budget_state.replaceAll("_", " ")}</span></div>
+          <div className={`progress${task.phase.progress == null ? " indeterminate" : ""}`}><span style={task.phase.progress == null ? undefined : { width: `${task.phase.progress * 100}%` }} /></div>
+          <div className="task-meta"><span>{task.permission_state}</span><span>{task.budget_state.replaceAll("_", " ")}</span><span title={task.timestamp}>{taskAge(task.timestamp, clock)}</span></div>
           {task.cancellable && <div className="task-actions"><button onClick={() => pause(task.task_id, task.phase.activity !== "Paused")}><CirclePause size={13} /> {task.phase.activity === "Paused" ? "Resume" : "Pause"}</button><button onClick={() => stop(task.task_id)}><Square size={12} /> Stop</button></div>}
           {task.error && <p className="task-error">{task.error.message}</p>}
         </article>)}
       </div>
-      <section className="runtime"><p className="eyebrow">RUNTIME</p>{Object.entries(status.prerequisites).map(([name, available]) => <div key={name}><span>{name.replace("_", " ")}</span><b className={available ? "ok" : "missing"}>{available ? "ready" : "missing"}</b></div>)}<div><span>task journal</span><b className={status.task_journal_error ? "missing" : "ok"} title={status.task_journal_error || undefined}>{status.task_journal_error ? "error" : status.vault_mounted ? "durable" : "locked"}</b></div><div><span>file watcher</span><b className={status.watcher_error ? "missing" : "ok"} title={status.watcher_error || undefined}>{status.watcher_error ? "error" : status.vault_mounted ? "watching" : "locked"}</b></div><div><span>local model</span><b className={status.model_connected ? "ok" : status.model_error ? "missing" : ""} title={status.model_error || undefined}>{status.model_attach_in_progress ? "checking" : status.model_connected ? "attached" : status.model_error ? "error" : "offline"}</b></div><button className="runtime-action" disabled={!status.vault_mounted || status.model_attach_in_progress} onClick={openModel}><Cpu size={12} /> {status.model_connected ? "Model details" : "Attach local model"}</button></section>
+      <section className="runtime"><p className="eyebrow">RUNTIME</p>{Object.entries(status.prerequisites).map(([name, available]) => <div key={name}><span>{name.replace("_", " ")}</span><b className={available ? "ok" : "missing"}>{available ? "ready" : "missing"}</b></div>)}<div><span>task journal</span><b className={status.task_journal_error ? "missing" : "ok"} title={status.task_journal_error || undefined}>{status.task_journal_error ? "error" : status.vault_mounted ? "durable" : "locked"}</b></div><div><span>file watcher</span><b className={status.watcher_error ? "missing" : "ok"} title={status.watcher_error || undefined}>{status.watcher_error ? "error" : status.vault_mounted ? "watching" : "locked"}</b></div><div><span>local model</span><b className={status.model_connected ? "ok" : status.model_error ? "missing" : ""} title={status.model_error || undefined}>{status.model_attach_in_progress ? "checking" : status.model_connected ? "attached" : status.model_error ? "error" : "offline"}</b></div><div><span>hybrid retrieval</span><b className={status.hybrid_configured ? "ok" : ""}>{status.hybrid_configured ? status.hybrid_model || "configured" : "lexical only"}</b></div><button className="runtime-action" disabled={!status.vault_mounted || status.model_attach_in_progress} onClick={openModel}><Cpu size={12} /> {status.model_connected ? "Model details" : "Attach local model"}</button><button className="runtime-action" disabled={!status.vault_mounted || hybridRunning} onClick={openHybrid}><Settings2 size={12} /> {status.hybrid_configured ? "Hybrid retrieval settings" : "Configure hybrid retrieval"}</button></section>
       <section className="log-panel"><div className="log-title"><span>Live event log</span><span>schema 1.0</span></div><ActivityTerminal events={events} /></section>
     </aside>
     {setupOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeSetup(); }}>
@@ -378,6 +487,20 @@ export function App() {
           {(modelError || status.model_error) && <p className="setup-error" role="alert">{modelError || status.model_error}</p>}
           <footer><button type="button" disabled={modelRunning} onClick={closeModel}>Cancel</button><button className="primary" disabled={modelRunning}>{modelRunning ? "Checking local model…" : "Attach model"}</button></footer>
         </form>}
+      </section>
+    </div>}
+    {hybridOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeHybrid(); }}>
+      <section className="setup-modal model-modal" role="dialog" aria-modal="true" aria-labelledby="hybrid-title">
+        <header><div><p className="eyebrow">HYBRID RETRIEVAL</p><h2 id="hybrid-title">Configure vector retrieval</h2></div><button aria-label="Close hybrid retrieval settings" disabled={hybridRunning} onClick={closeHybrid}><X size={17} /></button></header>
+        <form onSubmit={configureHybrid}>
+          <div className="setup-intro"><Settings2 size={21} /><p>Pinky stores these settings inside the encrypted vault, validates the local embedding model, and verifies a supervised Qdrant process before enabling hybrid retrieval.</p></div>
+          <label>Qdrant executable<input value={hybridExecutable} onChange={(event) => setHybridExecutable(event.target.value)} placeholder="/usr/local/bin/qdrant" spellCheck={false} required /></label>
+          <label>Embedding Ollama endpoint<input type="url" value={hybridEndpoint} onChange={(event) => setHybridEndpoint(event.target.value)} placeholder="http://127.0.0.1:11434" spellCheck={false} required /></label>
+          <label>Installed embedding model<input value={hybridModel} onChange={(event) => setHybridModel(event.target.value)} placeholder="nomic-embed-text" spellCheck={false} required /></label>
+          <p className="source-support">The endpoint must be an explicit IPv4 loopback address. The embedding model must be installed locally, expose the embedding capability, and return a stable vector dimension. Qdrant data remains inside the mounted encrypted vault.</p>
+          {hybridError && <p className="setup-error" role="alert">{hybridError}</p>}
+          <footer><button type="button" disabled={hybridRunning} onClick={closeHybrid}>Cancel</button>{status.hybrid_configured && <button type="button" disabled={hybridRunning} onClick={() => void clearHybrid()}>Disable hybrid</button>}<button className="primary" disabled={hybridRunning}>{hybridRunning ? "Verifying hybrid runtime…" : "Verify and enable"}</button></footer>
+        </form>
       </section>
     </div>}
     {sourceOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeSource(); }}>

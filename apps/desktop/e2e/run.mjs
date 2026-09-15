@@ -93,6 +93,11 @@ try {
   assert.equal(await request("GET", `/session/${sessionId}/title`), "Pinky");
   assert.equal(await execute("return document.querySelectorAll('aside.left-panel, section.centre-panel, aside.right-panel').length"), 3);
   assert.match(await execute("return document.querySelector('.vault-card').textContent"), /Vault locked/);
+  assert.equal(
+    await execute("return [...document.querySelectorAll('.runtime > div')].find((row) => row.textContent.includes('local model'))?.querySelector('b')?.textContent"),
+    "offline",
+    "a clean profile must not retain a model attachment",
+  );
   assert.equal(await execute("return document.querySelector('button.send').disabled"), true);
   assert.equal(await execute("return document.querySelector('button.new-chat').disabled"), true);
   assert.equal(await execute("return [...document.querySelectorAll('.mode-switch button')].map((button) => button.textContent.trim()).join('|')"), "Ask|Search");

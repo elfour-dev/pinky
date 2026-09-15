@@ -53,31 +53,67 @@ recover as `failed_interrupted`, recoverable model transport failures receive
 one bounded retry without duplicate assistant messages, and the Ask error path
 offers local-model reconnect guidance. Existing encrypted task journals retain
 bounded diagnostics; keyboard/live-region, reduced-motion, and non-WebGL paths
-remain enabled. The clean-account packaging check, offline target-host
-demonstration, and direct plaintext inspection are still release gates.
+remain enabled. A deterministic offline acceptance test now covers tutorial
+ingestion, cited retrieval, exact citation reopening, evidence gaps,
+pre-cancellation, and encrypted conversation restart. The pinned clean-Debian
+package and fresh-profile model-offline checks pass. The configured target-host
+offline demonstration and direct plaintext inspection now pass. The real
+Ollama scenario and bounded external-profile scanner are wired in
+`tests/live_ollama.rs` and `docs/PRIVACY_INSPECTION.md`; only the
+SSH-specific process-boundary review requires a target-host run with the
+user's credentials.
 
 ## Verification completed
 
 - `cargo fmt --all --check`: passed
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed
-- `cargo test --workspace`: 87 core and 6 desktop tests passed
+- `cargo test --workspace`: 94 core unit, 1 offline integration, and 10 desktop
+  tests passed
 - two opt-in live Ollama target-host tests: passed separately
 - opt-in live Secret Service/FUSE and Ollama tests: ignored in the ordinary
   regression suite as designed
-- `npm test`: 4 frontend tests passed
+- `npm test`: 12 frontend tests passed
 - `npm run build`: passed without warnings after deterministic vendor chunking
 - `npm run test:e2e`: passed, including locked Ask/Search mode and task controls
+- `cargo test -p pinky-core --test pinky_lite_offline`: passed, including the
+  offline tutorial cited-answer and encrypted conversation restart scenario
+- `npm run verify:bundle`: passed for the Debian and AppImage artifacts
+- `npm run test:clean-install`: passed in the pinned Debian container
+- `node apps/desktop/scripts/inspect-plaintext.mjs`: passed with a positive
+  external-marker and excluded-vault fixture
+- R6 target-host Ollama acceptance: the three ignored live checks passed on
+  2026-09-15 against `qwen3.5:4b` through an explicit loopback endpoint. A
+  temporary local forward was used because SSH credentials were unavailable in
+  this shell; repeat the SSH-specific process-boundary review on the target
+  host before release.
+- R6 direct plaintext inspection: passed against the application-data and cache
+  roots with the mounted vault excluded; no configured evidence markers were
+  found outside the vault. The positive/negative scanner fixtures also pass.
 - `git diff --check`: passed
 
 The deterministic fake llama-server test needs loopback permission; the
 restricted filesystem sandbox returned `EPERM`, and the same suite passed when
 run with explicit local-loopback permission.
 
-## Next implementation slice: R6 release acceptance
+## Next implementation slice: R7 onboarding and release acceptance
 
-Run the remaining opt-in release checks described in `CITED_QA_PHASES.md`:
-the clean-account Ollama packaging path, offline target-host tutorial
-demonstration, direct plaintext inspection, and full R0-R6 acceptance ledger.
+Run the remaining SSH-specific process-boundary check described in
+`CITED_QA_PHASES.md`, then continue with R7 onboarding and release acceptance.
+R7 now includes the bounded embedding
+provider/indexer contract, current retained-chunk loading for backfill,
+citation-preserving fusion, a separate Ollama embedding-model probe with a
+smoke vector, and cancellable core hybrid-search orchestration. An opt-in
+desktop bridge now validates the embedding model, lazily starts and reuses one
+supervised Qdrant sidecar per application session, and reports retrieval
+phases when the three documented environment values are set. The runtime panel
+now verifies and stores the hybrid settings inside the encrypted vault and
+stops the sidecar after five idle minutes. The signed artifact manifest
+verifier now covers strict metadata, Ed25519 signatures, checksums, and atomic
+installation. Use `docs/PRIVACY_INSPECTION.md` for the scanner command and run
+the ignored live test with `PINKY_OLLAMA_ENDPOINT` and
+`PINKY_OLLAMA_MODEL` set. The next slice is desktop artifact onboarding, a
+live backfill acceptance, reranking, and warm retrieval performance
+measurement.
 
 ## Orientation commands
 

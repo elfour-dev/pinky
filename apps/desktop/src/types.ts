@@ -19,11 +19,14 @@ export interface RuntimeStatus {
   model_name: string | null;
   model_context_size: number | null;
   model_error: string | null;
+  hybrid_configured: boolean;
+  hybrid_model: string | null;
   prerequisites: Record<string, boolean>;
 }
 export interface VaultPaths { cipher_dir: string; mount_dir: string; }
 export interface SetupVaultResponse { vault_id: string; recovery_path: string; }
 export interface AttachLlamaResponse { provider: string; model_name: string; context_size: number; total_slots: number; }
+export interface HybridConfiguration { qdrant_executable: string; embedding_endpoint: string; embedding_model: string; }
 export interface SourceSummary {
   source_id: string;
   version_id: string;

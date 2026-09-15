@@ -13,6 +13,8 @@ Planning and resumption documents:
 - [Hands-on vault tutorial and example sources](docs/VAULT_TUTORIAL.md)
 - [Cited local Q&A delivery phases](docs/CITED_QA_PHASES.md)
 - [Offline self-development strategy](docs/OFFLINE_SELF_DEVELOPMENT.md)
+- [R6 privacy inspection](docs/PRIVACY_INSPECTION.md)
+- [Signed runtime artifact contract](docs/ARTIFACT_MANIFEST.md)
 - [Next-session handoff](docs/NEXT_SESSION.md)
 - [Implementation acceptance ledger](docs/IMPLEMENTATION_STATUS.md)
 
@@ -48,16 +50,43 @@ storage, unmounting, restart-time unlocking, and encrypted object recovery on
 the target host. Native compilation, WebDriver end-to-end checks, Linux bundle
 inspection, and clean Debian package installation now pass. The local
 text-ingestion and lexical-search slices are usable from the Sources panel and
-composer. Additional extractors, vector retrieval, models, research,
-generated-code containers, image generation, backup/restore, and the later
-release gates remain unimplemented. The composer searches retained evidence but
-does not yet synthesize chat answers; that requires the local model runtime.
-Retained-data operations remain disabled while the vault is unavailable.
+composer. When a local Ollama model is attached, **Ask** mode retrieves retained
+passages and produces validated, cited answers; **Search** mode remains an
+explicit lexical lookup. Hybrid vector retrieval is available as an opt-in
+development path; additional extractors, automatic research, generated-code
+containers, image generation, backup/restore, and the later release gates
+remain unimplemented. Retained-data operations remain disabled while the vault
+is unavailable.
 
 Core also contains the next retrieval foundation: a supervised, authenticated,
 loopback-only Qdrant client and the specified reciprocal-rank fusion algorithm.
-It remains dormant until onboarding installs and verifies the Qdrant executable
-and local embedding model; Pinky does not generate substitute embeddings.
+Hybrid retrieval remains dormant by default until a local Qdrant executable and
+embedding model are explicitly configured; Pinky does not generate substitute
+embeddings.
+
+There is an opt-in R7 desktop bridge for development validation. Set all three
+values before launching Pinky to enable hybrid retrieval in Ask and Search:
+
+```bash
+export PINKY_QDRANT_EXECUTABLE=/absolute/path/to/qdrant
+export PINKY_OLLAMA_EMBEDDING_ENDPOINT=http://127.0.0.1:11434
+export PINKY_OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+```
+
+The embedding endpoint must be an explicit loopback Ollama endpoint and the
+model must be a locally installed embedding model. Pinky validates the
+embedding model, starts Qdrant lazily on a random loopback port, backfills
+current chunks from encrypted objects, and keeps the supervised sidecar alive
+for the application session so subsequent searches do not restart it. If the
+sidecar becomes unhealthy it is replaced, and it is stopped after five minutes
+of inactivity. When these values are absent, the normal lexical retrieval path
+remains in use.
+
+For a persistent configuration, unlock the vault and choose **Configure hybrid
+retrieval** in the runtime panel. Pinky verifies the embedding model and Qdrant
+executable before storing their paths and names inside the encrypted SQLCipher
+database. The environment variables remain useful for development-only
+fallbacks and do not override a saved vault configuration.
 
 The in-progress cited-Q&A milestone now attaches either an existing local
 Ollama instance or an authenticated llama.cpp server. After vault unlock, open
@@ -72,16 +101,39 @@ Ollama instance or an authenticated llama.cpp server. After vault unlock, open
   against the protected `/props` endpoint.
 
 Both providers must use an explicit IPv4 loopback port; Pinky bypasses ambient
-HTTP proxies. Attaching a model does not enable chat yet: the validated answer
-contract is complete in the Rust core, but its desktop integration remains the
-R4 gate in `docs/CITED_QA_PHASES.md`.
+HTTP proxies. After attaching a model, unlock the vault, add at least one
+retained source, switch the composer to **Ask**, and submit a question. Pinky
+retrieves current retained evidence, sends only that evidence and the bounded
+conversation window to the local model, validates the structured answer, and
+renders exact retained-version citations. It does not use general-knowledge
+fallback or public-web research yet.
 
 ## Setup on Debian or Ubuntu
 
 The commands below describe a fresh development installation. Do not begin with
 `npm run tauri dev` until both Node.js and Rust/Cargo are available.
 
-### 1. Install native dependencies
+### Automated bootstrap (recommended)
+
+The repository includes an idempotent Debian/Ubuntu bootstrap for development.
+It installs the native Tauri, vault, Podman, Vulkan, and WebDriver packages,
+installs or verifies the stable Rust toolchain, fetches locked Rust crates,
+installs the locked desktop JavaScript dependencies, and installs
+`tauri-driver` for native end-to-end tests:
+
+```bash
+./scripts/bootstrap-dev.sh
+```
+
+Use `./scripts/bootstrap-dev.sh --skip-e2e` when the WebDriver acceptance suite
+is not needed. The script requires `sudo` for system packages and does not
+download Ollama, model files, or Qdrant; those optional runtimes are large and
+must be installed and configured separately. It supports Debian-family systems
+only. The remaining sections document the equivalent manual setup.
+
+### Manual setup
+
+#### 1. Install native dependencies
 
 Install the current Tauri 2 Linux build dependencies together with the two
 tools required to create and unlock Pinky's encrypted vault:
@@ -113,7 +165,7 @@ sudo apt install -y podman vulkan-tools
 The upstream [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
 are the authority for distribution-specific package changes.
 
-### 2. Install Rust and Cargo
+#### 2. Install Rust and Cargo
 
 Tauri requires Rust. Install the stable toolchain with the official `rustup`
 installer; Cargo is included:
@@ -135,7 +187,7 @@ rustc --version
 cargo --version
 ```
 
-### 3. Install Node.js and project dependencies
+#### 3. Install Node.js and project dependencies
 
 Install a supported Node.js LTS release from <https://nodejs.org/> if Node is
 not already present. Pinky requires Node.js 20 or newer.
@@ -153,7 +205,7 @@ Run `cd apps/desktop` from the root of your Pinky checkout.
 The Tauri CLI is already a locked npm development dependency. Do not install a
 second global copy merely to run this project.
 
-### 4. Verify and launch
+#### 4. Verify and launch
 
 From the desktop application directory:
 
@@ -168,12 +220,36 @@ compiles Rust dependencies. The application window should then open. Pinky
 needs a normal graphical desktop session with D-Bus and Linux Secret Service in
 order to create or unlock its vault.
 
+The expression debug lab is hidden during normal launches. To opt into the
+temporary ALMA state controls, pass the explicit application argument:
+
+```bash
+# Development launch (the second `--` forwards the argument to Pinky)
+npm run tauri dev -- -- --expression-debug
+
+# Existing native debug build, when still in apps/desktop
+../../target/debug/pinky-desktop --expression-debug
+
+# The same native build when launched from the repository root
+./target/debug/pinky-desktop --expression-debug
+```
+
 To run the Rust tests separately from the repository root:
 
 ```bash
 cd ../..
 cargo test --workspace
 ```
+
+To run the deterministic offline Pinky Lite acceptance scenario independently:
+
+```bash
+cargo test -p pinky-core --test pinky_lite_offline
+```
+
+This uses the bundled Project Alder tutorial sources and a local fixture
+provider; it does not contact Ollama or the public internet. The configured
+Ollama target-host scenario remains an opt-in release check.
 
 ### Troubleshooting setup
 

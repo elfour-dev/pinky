@@ -4,8 +4,10 @@
 //! for callers to accidentally persist source material outside the encrypted
 //! boundary.
 
+pub mod artifact;
 pub mod conversation;
 pub mod database;
+pub mod embedding;
 pub mod hybrid;
 pub mod inference;
 pub mod ingestion;
@@ -22,11 +24,20 @@ pub mod task;
 pub mod task_journal;
 pub mod vault;
 
+pub use artifact::{
+    ArtifactDigest, ArtifactError, ArtifactKind, ArtifactManifestV1, SignedArtifactManifestV1,
+    ARTIFACT_MANIFEST_SCHEMA_VERSION,
+};
 pub use conversation::{
     ConversationDetail, ConversationError, ConversationMessage, ConversationService,
     ConversationSummary, MessageDraft,
 };
-pub use database::{Database, DatabaseError};
+pub use database::{Database, DatabaseError, HybridConfiguration};
+pub use embedding::{
+    EmbeddingError, EmbeddingFuture, EmbeddingIndexError, EmbeddingIndexer, EmbeddingProvider,
+    EmbeddingResponse, DEFAULT_EMBEDDING_BATCH_SIZE, MAX_EMBEDDING_ERROR_BYTES,
+    MAX_EMBEDDING_INPUTS, MAX_EMBEDDING_INPUT_BYTES, MAX_EMBEDDING_RESPONSE_BYTES,
+};
 pub use hybrid::{
     reciprocal_rank_fusion, FusedChunk, RankedChunk, MAX_CHUNKS_PER_SOURCE_VERSION, RRF_K,
 };
@@ -43,7 +54,7 @@ pub use llama::{LlamaClient, LlamaError, LlamaHealth, LlamaRuntimeInfo, MIN_CHAT
 pub use object_store::{
     CompressionClass, ObjectMetadata, ObjectStore, ObjectStoreError, StoredObject,
 };
-pub use ollama::{OllamaClient, OllamaError, OllamaRuntimeInfo};
+pub use ollama::{OllamaClient, OllamaEmbeddingRuntimeInfo, OllamaError, OllamaRuntimeInfo};
 pub use onboarding::{
     create_registered_vault, create_vault, read_registration, unlock_registered_vault,
     write_registration, GocryptfsMount, OnboardedVault, OnboardingError, SystemVaultPlatform,
@@ -60,7 +71,10 @@ pub use qdrant::{
     QdrantClient, QdrantError, QdrantLaunchConfig, QdrantSidecar, VectorMatch, VectorPoint,
 };
 pub use recovery::{RecoveryEnvelope, RecoveryError, VaultKey, VaultSubkeys};
-pub use retrieval::{CitationPassage, IndexedChunk, RetrievalError, RetrievalService, SearchHit};
-pub use task::{TaskEvent, TaskManager, TaskPhase, TaskState};
+pub use retrieval::{
+    CitationPassage, HybridRetrievalError, IndexedChunk, RetrievalError, RetrievalService,
+    SearchHit, HYBRID_CANDIDATE_LIMIT,
+};
+pub use task::{TaskContext, TaskEvent, TaskManager, TaskPhase, TaskState};
 pub use task_journal::{TaskJournal, TaskJournalError};
 pub use vault::{MountVerifier, ProcMountVerifier, Vault, VaultError};

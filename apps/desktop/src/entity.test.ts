@@ -6,4 +6,11 @@ describe("deriveEntityState", () => {
     expect(deriveEntityState([{ state: "cancelling", phase: { name: "research" } }])).toBe("cancelling");
     expect(deriveEntityState([{ state: "failed", phase: { name: "ingest" } }])).toBe("error");
   });
+
+  it("lets a newer active task recover from an older failed request", () => {
+    expect(deriveEntityState([
+      { state: "failed", phase: { name: "cited answer" }, sequence: 4 },
+      { state: "running", phase: { name: "cited answer" }, sequence: 5 },
+    ])).toBe("thinking");
+  });
 });

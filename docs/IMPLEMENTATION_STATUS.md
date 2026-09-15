@@ -35,11 +35,15 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Provider-neutral bounded and cancellable Ollama structured generation
   transport
 - [x] Strict versioned evidence and cited-answer validation contract
-- [ ] Embedding model integration and end-to-end Qdrant vector indexing
+- [x] Opt-in embedding model integration, end-to-end Qdrant vector indexing,
+  and citation-preserving hybrid retrieval
+- [x] Signed artifact manifest verification and atomic, checksum-verified
+  installation contract
 - [x] One-shot cited Q&A over retained lexical evidence with explicit Ask/Search
   modes, cancellable task events, validated claims, warnings, gaps, and exact
   citation reopening
-- [ ] Model onboarding, hybrid retrieval, hybrid cited chat, claims, and dossiers
+- [ ] Signed model/Qdrant artifact onboarding, default hybrid cited chat, claims,
+  and dossiers
 - [x] Encrypted persistent conversations with immutable ordered messages,
   bounded history, validated-answer persistence, and create/select/rename/delete
   desktop interactions
@@ -108,9 +112,27 @@ used by cancellable workers. The client creates a cosine collection with HNSW
 and scalar int8 quantization on disk, normalizes vectors, upserts UUID points,
 and queries with authenticated requests that bypass ambient proxies. Reciprocal
 rank fusion uses `k = 60`, deduplicates chunk UUIDs, and caps results at three
-chunks per source version. This is a tested runtime contract, not yet a user
-feature: the signed embedding model and Qdrant executable still need onboarding
-before real vector indexing can begin.
+chunks per source version. This is available through the documented opt-in
+bridge; signed artifact onboarding and default user-facing configuration remain
+gated before it can become the normal retrieval path.
+
+R7 groundwork now includes a bounded provider-neutral embedding contract, an
+Ollama `/api/embed` transport with cancellation and vector validation, and a
+separate embedding-model probe that rejects completion-only, non-GGUF, or
+remote models before running a bounded smoke embedding. A batched retained-
+chunk indexer can upsert into the authenticated Qdrant client. The retrieval
+service can now load only current retained chunks from encrypted objects for
+backfill, without rereading original files. A cancellable core hybrid-search
+method now embeds a query, retrieves lexical and vector candidates, and
+preserves exact citations while applying the existing RRF source-version cap.
+The desktop bridge now validates the embedding model, starts one supervised
+Qdrant sidecar lazily per application session, replaces an unhealthy sidecar,
+reports retrieval phases, reuses the encrypted vector index for subsequent
+searches, and shuts the sidecar down after five idle minutes. The runtime panel
+can verify and store the Qdrant executable and embedding settings in the
+encrypted SQLCipher database; without a saved configuration or all three
+development fallback values it retains the lexical path. Signed artifact
+onboarding and live acceptance remain gated.
 
 The llama.cpp compatibility boundary accepts only an explicit
 `http://127.0.0.1:<port>` llama-server origin, requires a 256-bit hexadecimal
@@ -176,8 +198,8 @@ ordered, preserve model/citation/task metadata, and support replacement links.
 The desktop restores conversations after unlock, limits model history to the
 last eight messages, persists an assistant message only after R3 validation,
 and exposes encrypted create/select/rename/delete controls. Invalid or
-cancelled inference never creates a completed assistant message. A direct
-filesystem plaintext inspection remains a release acceptance check.
+cancelled inference never creates a completed assistant message. The direct
+filesystem plaintext inspection passed in the R6 acceptance run.
 
 R6 completes the automated Pinky Lite reliability path. Existing encrypted task
 journals recover interrupted work as `failed_interrupted`; cited answers retry
@@ -185,8 +207,18 @@ once only for recoverable transport failures, without creating duplicate
 assistant messages. Transport failures expose a reconnect action, while task
 events and bounded provider error bodies remain encrypted diagnostics. The
 desktop retains keyboard navigation, live announcements, reduced-motion
-support, and a non-WebGL text fallback. Clean-account packaging, target-host
-offline demonstration, and direct plaintext inspection remain release checks.
+support, and a non-WebGL text fallback. The deterministic offline acceptance
+test ingests the Project Alder tutorial pack, validates a fixture-backed cited
+answer, reopens its exact citation, exercises an explicit evidence gap and
+pre-cancelled request, then restores the encrypted conversation after restart.
+The pinned clean-Debian install and fresh-profile E2E check pass without a
+persisted model attachment. On 2026-09-15 the full Project Alder target-host
+scenario passed all three live Ollama checks through an explicit loopback
+endpoint, and the direct plaintext scanner found no markers in the
+application-data or cache roots outside the mounted vault. The live check used
+a temporary local forward because SSH credentials were not available in this
+shell; repeat the SSH-specific process-boundary review on the target host
+before release.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and

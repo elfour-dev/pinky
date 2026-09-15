@@ -6,8 +6,9 @@ use zeroize::Zeroizing;
 
 use crate::{Vault, VaultError};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MIGRATION_001: &str = include_str!("../migrations/001_initial.sql");
+const MIGRATION_002: &str = include_str!("../migrations/002_hybrid_configuration.sql");
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -29,6 +30,13 @@ pub enum DatabaseError {
 /// caller-visible wrapper after SQLCipher has copied it into the connection.
 pub struct Database {
     connection: Connection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HybridConfiguration {
+    pub qdrant_executable: String,
+    pub embedding_endpoint: String,
+    pub embedding_model: String,
 }
 
 impl Database {
@@ -61,14 +69,65 @@ impl Database {
         }
         if is_new || version == 0 {
             connection.execute_batch(MIGRATION_001)?;
-            connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            connection.execute_batch(MIGRATION_002)?;
+        } else if version < SCHEMA_VERSION {
+            connection.execute_batch(MIGRATION_002)?;
         }
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         sync_parent(&path)?;
         Ok(Self { connection })
     }
 
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    pub fn hybrid_configuration(&self) -> Result<Option<HybridConfiguration>, DatabaseError> {
+        let result = self.connection.query_row(
+            "SELECT qdrant_executable, embedding_endpoint, embedding_model
+                 FROM hybrid_configuration WHERE id = 1",
+            [],
+            |row| {
+                Ok(HybridConfiguration {
+                    qdrant_executable: row.get(0)?,
+                    embedding_endpoint: row.get(1)?,
+                    embedding_model: row.get(2)?,
+                })
+            },
+        );
+        match result {
+            Ok(configuration) => Ok(Some(configuration)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(DatabaseError::Sql(error)),
+        }
+    }
+
+    pub fn set_hybrid_configuration(
+        &self,
+        configuration: &HybridConfiguration,
+    ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "INSERT INTO hybrid_configuration
+                (id, qdrant_executable, embedding_endpoint, embedding_model, configured_at, updated_at)
+             VALUES (1, ?1, ?2, ?3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET
+                qdrant_executable = excluded.qdrant_executable,
+                embedding_endpoint = excluded.embedding_endpoint,
+                embedding_model = excluded.embedding_model,
+                updated_at = CURRENT_TIMESTAMP",
+            rusqlite::params![
+                configuration.qdrant_executable,
+                configuration.embedding_endpoint,
+                configuration.embedding_model,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_hybrid_configuration(&self) -> Result<(), DatabaseError> {
+        self.connection
+            .execute("DELETE FROM hybrid_configuration WHERE id = 1", [])?;
+        Ok(())
     }
 }
 
@@ -109,8 +168,34 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let hybrid_table: String = database
+            .connection()
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'hybrid_configuration'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(source_table, "sources");
+        assert_eq!(hybrid_table, "hybrid_configuration");
+        database
+            .set_hybrid_configuration(&HybridConfiguration {
+                qdrant_executable: "/usr/bin/qdrant".into(),
+                embedding_endpoint: "http://127.0.0.1:11434".into(),
+                embedding_model: "nomic-embed-text".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            database.hybrid_configuration().unwrap(),
+            Some(HybridConfiguration {
+                qdrant_executable: "/usr/bin/qdrant".into(),
+                embedding_endpoint: "http://127.0.0.1:11434".into(),
+                embedding_model: "nomic-embed-text".into(),
+            })
+        );
+        database.clear_hybrid_configuration().unwrap();
+        assert!(database.hybrid_configuration().unwrap().is_none());
         drop(database);
 
         let raw = fs::read(vault.root().join("database/pinky.sqlite3")).unwrap();
@@ -128,5 +213,38 @@ mod tests {
             Database::open(&vault, Zeroizing::new(vec![0; 16])),
             Err(DatabaseError::InvalidKeyLength)
         ));
+    }
+
+    #[test]
+    fn migrates_schema_one_to_two_without_losing_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(root.path(), Mounted).unwrap();
+        let database = Database::open(&vault, Zeroizing::new(vec![0x2a; 32])).unwrap();
+        database
+            .connection()
+            .execute("DROP TABLE hybrid_configuration", [])
+            .unwrap();
+        database
+            .connection()
+            .pragma_update(None, "user_version", 1_i64)
+            .unwrap();
+        drop(database);
+
+        let reopened = Database::open(&vault, Zeroizing::new(vec![0x2a; 32])).unwrap();
+        let version: i64 = reopened
+            .connection()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(reopened.hybrid_configuration().unwrap().is_none());
+        let source_table: String = reopened
+            .connection()
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sources'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_table, "sources");
     }
 }

@@ -7,9 +7,11 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    InferenceError, InferenceFuture, InferenceMetrics, InferenceProvider, InferenceResponse,
-    StructuredGenerationRequest, MAX_INFERENCE_REQUEST_BYTES, MAX_INFERENCE_RESPONSE_BYTES,
-    MIN_CHAT_CONTEXT,
+    EmbeddingError, EmbeddingFuture, EmbeddingProvider, EmbeddingResponse, InferenceError,
+    InferenceFuture, InferenceMetrics, InferenceProvider, InferenceResponse,
+    StructuredGenerationRequest, MAX_EMBEDDING_ERROR_BYTES, MAX_EMBEDDING_INPUTS,
+    MAX_EMBEDDING_INPUT_BYTES, MAX_EMBEDDING_RESPONSE_BYTES, MAX_INFERENCE_REQUEST_BYTES,
+    MAX_INFERENCE_RESPONSE_BYTES, MIN_CHAT_CONTEXT,
 };
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,6 +40,10 @@ pub enum OllamaError {
     },
     #[error("Ollama model `{0}` is not a local GGUF completion model")]
     UnsupportedModel(String),
+    #[error("Ollama model `{0}` is not a local GGUF embedding model")]
+    UnsupportedEmbeddingModel(String),
+    #[error("Ollama embedding smoke test failed: {0}")]
+    Embedding(#[from] EmbeddingError),
     #[error("Ollama model context is {found} tokens; at least {minimum} are required")]
     ContextTooSmall { found: u64, minimum: u64 },
 }
@@ -46,6 +52,13 @@ pub enum OllamaError {
 pub struct OllamaRuntimeInfo {
     pub model_name: String,
     pub context_size: u64,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OllamaEmbeddingRuntimeInfo {
+    pub model_name: String,
+    pub dimensions: usize,
     pub version: String,
 }
 
@@ -93,6 +106,78 @@ impl OllamaClient {
         &self,
         cancellation: &CancellationToken,
     ) -> Result<OllamaRuntimeInfo, OllamaError> {
+        let (version, details) = self.probe_metadata(cancellation).await?;
+        if !details.details.format.eq_ignore_ascii_case("gguf")
+            || !details
+                .capabilities
+                .iter()
+                .any(|capability| capability == "completion")
+        {
+            return Err(OllamaError::UnsupportedModel(self.model_name.clone()));
+        }
+        let context_size = details
+            .details
+            .context_length
+            .or_else(|| {
+                details
+                    .model_info
+                    .iter()
+                    .filter(|(key, _)| key.ends_with(".context_length"))
+                    .filter_map(|(_, value)| value.as_u64())
+                    .max()
+            })
+            .ok_or(OllamaError::InvalidResponse("model context"))?;
+        if context_size < MIN_CHAT_CONTEXT {
+            return Err(OllamaError::ContextTooSmall {
+                found: context_size,
+                minimum: MIN_CHAT_CONTEXT,
+            });
+        }
+
+        Ok(OllamaRuntimeInfo {
+            model_name: self.model_name.clone(),
+            context_size,
+            version: version.version,
+        })
+    }
+
+    pub async fn probe_embedding(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<OllamaEmbeddingRuntimeInfo, OllamaError> {
+        let (version, details) = self.probe_metadata(cancellation).await?;
+        if !details.details.format.eq_ignore_ascii_case("gguf")
+            || !details
+                .capabilities
+                .iter()
+                .any(|capability| capability == "embedding")
+        {
+            return Err(OllamaError::UnsupportedEmbeddingModel(
+                self.model_name.clone(),
+            ));
+        }
+        let smoke_test = self
+            .embed_inner(
+                &["Pinky embedding capability check".to_owned()],
+                cancellation,
+            )
+            .await?;
+        let dimensions = smoke_test
+            .vectors
+            .first()
+            .map(Vec::len)
+            .ok_or(EmbeddingError::InvalidVectors)?;
+        Ok(OllamaEmbeddingRuntimeInfo {
+            model_name: self.model_name.clone(),
+            dimensions,
+            version: version.version,
+        })
+    }
+
+    async fn probe_metadata(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<(VersionResponse, ShowResponse), OllamaError> {
         let version: VersionResponse = self
             .get_json("api/version", "version", cancellation)
             .await?;
@@ -141,38 +226,18 @@ impl OllamaClient {
         let details: ShowResponse = read_json(request, "model details", cancellation).await?;
         if details.remote_model.as_deref().is_some_and(not_empty)
             || details.remote_host.as_deref().is_some_and(not_empty)
-            || !details.details.format.eq_ignore_ascii_case("gguf")
-            || !details
-                .capabilities
-                .iter()
-                .any(|capability| capability == "completion")
         {
             return Err(OllamaError::UnsupportedModel(self.model_name.clone()));
         }
-        let context_size = details
-            .details
-            .context_length
-            .or_else(|| {
-                details
-                    .model_info
-                    .iter()
-                    .filter(|(key, _)| key.ends_with(".context_length"))
-                    .filter_map(|(_, value)| value.as_u64())
-                    .max()
-            })
-            .ok_or(OllamaError::InvalidResponse("model context"))?;
-        if context_size < MIN_CHAT_CONTEXT {
-            return Err(OllamaError::ContextTooSmall {
-                found: context_size,
-                minimum: MIN_CHAT_CONTEXT,
-            });
-        }
+        Ok((version, details))
+    }
 
-        Ok(OllamaRuntimeInfo {
-            model_name: self.model_name.clone(),
-            context_size,
-            version: version.version,
-        })
+    pub async fn embed(
+        &self,
+        inputs: &[String],
+        cancellation: &CancellationToken,
+    ) -> Result<EmbeddingResponse, EmbeddingError> {
+        self.embed_inner(inputs, cancellation).await
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(
@@ -278,6 +343,86 @@ impl OllamaClient {
             },
         })
     }
+
+    async fn embed_inner(
+        &self,
+        inputs: &[String],
+        cancellation: &CancellationToken,
+    ) -> Result<EmbeddingResponse, EmbeddingError> {
+        if inputs.is_empty() || inputs.len() > MAX_EMBEDDING_INPUTS {
+            return Err(EmbeddingError::InvalidInputCount);
+        }
+        if inputs
+            .iter()
+            .any(|input| input.trim().is_empty() || input.len() > MAX_EMBEDDING_INPUT_BYTES)
+        {
+            return Err(EmbeddingError::InvalidInput);
+        }
+        let body = serde_json::to_vec(&EmbedRequest {
+            model: &self.model_name,
+            input: inputs,
+        })
+        .map_err(|_| EmbeddingError::MalformedResponse)?;
+        if body.len() > MAX_EMBEDDING_INPUT_BYTES {
+            return Err(EmbeddingError::InvalidInput);
+        }
+        let request = self
+            .client
+            .post(
+                self.base_url
+                    .join("api/embed")
+                    .map_err(|_| EmbeddingError::MalformedResponse)?,
+            )
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .timeout(PROBE_TIMEOUT);
+        let response = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(EmbeddingError::Cancelled),
+            response = request.send() => response?,
+        };
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = read_bounded_embedding_error(response, cancellation).await?;
+            return Err(EmbeddingError::Rejected { status, body });
+        }
+        let body = read_bounded_embedding_body(response, cancellation).await?;
+        let response: OllamaEmbedResponse =
+            serde_json::from_slice(&body).map_err(|_| EmbeddingError::MalformedResponse)?;
+        if response.remote_model.as_deref().is_some_and(not_empty)
+            || response.remote_host.as_deref().is_some_and(not_empty)
+        {
+            return Err(EmbeddingError::RemoteResponse);
+        }
+        if response.model != self.model_name {
+            return Err(EmbeddingError::ModelMismatch {
+                expected: self.model_name.clone(),
+                found: response.model,
+            });
+        }
+        if response.embeddings.len() != inputs.len()
+            || response.embeddings.is_empty()
+            || response.embeddings.iter().any(|vector| {
+                vector.is_empty()
+                    || vector.iter().any(|value| !value.is_finite())
+                    || vector.iter().map(|value| value * value).sum::<f32>() <= f32::EPSILON
+            })
+        {
+            return Err(EmbeddingError::InvalidVectors);
+        }
+        let dimension = response.embeddings[0].len();
+        if response
+            .embeddings
+            .iter()
+            .any(|vector| vector.len() != dimension)
+        {
+            return Err(EmbeddingError::InvalidVectors);
+        }
+        Ok(EmbeddingResponse {
+            model: self.model_name.clone(),
+            vectors: response.embeddings,
+        })
+    }
 }
 
 impl InferenceProvider for OllamaClient {
@@ -287,6 +432,16 @@ impl InferenceProvider for OllamaClient {
         cancellation: &'a CancellationToken,
     ) -> InferenceFuture<'a> {
         Box::pin(self.generate_structured_inner(request, cancellation))
+    }
+}
+
+impl EmbeddingProvider for OllamaClient {
+    fn embed<'a>(
+        &'a self,
+        inputs: &'a [String],
+        cancellation: &'a CancellationToken,
+    ) -> EmbeddingFuture<'a> {
+        Box::pin(self.embed_inner(inputs, cancellation))
     }
 }
 
@@ -373,6 +528,20 @@ struct ChatMessageResponse {
     content: String,
 }
 
+#[derive(Serialize)]
+struct EmbedRequest<'a> {
+    model: &'a str,
+    input: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct OllamaEmbedResponse {
+    model: String,
+    embeddings: Vec<Vec<f32>>,
+    remote_model: Option<String>,
+    remote_host: Option<String>,
+}
+
 async fn read_json<T: for<'de> Deserialize<'de>>(
     request: reqwest::RequestBuilder,
     response_name: &'static str,
@@ -447,6 +616,57 @@ async fn read_bounded_error(
         body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
     }
     Ok(bounded(&String::from_utf8_lossy(&body)))
+}
+
+async fn read_bounded_embedding_body(
+    mut response: reqwest::Response,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, EmbeddingError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_EMBEDDING_RESPONSE_BYTES as u64)
+    {
+        return Err(EmbeddingError::ResponseTooLarge {
+            limit: MAX_EMBEDDING_RESPONSE_BYTES,
+        });
+    }
+    let mut body = Vec::new();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(EmbeddingError::Cancelled),
+            chunk = response.chunk() => chunk?,
+        };
+        let Some(chunk) = chunk else {
+            return Ok(body);
+        };
+        if body.len().saturating_add(chunk.len()) > MAX_EMBEDDING_RESPONSE_BYTES {
+            return Err(EmbeddingError::ResponseTooLarge {
+                limit: MAX_EMBEDDING_RESPONSE_BYTES,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+}
+
+async fn read_bounded_embedding_error(
+    mut response: reqwest::Response,
+    cancellation: &CancellationToken,
+) -> Result<String, EmbeddingError> {
+    let mut body = Vec::new();
+    while body.len() < MAX_EMBEDDING_ERROR_BYTES {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(EmbeddingError::Cancelled),
+            chunk = response.chunk() => chunk?,
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let remaining = MAX_EMBEDDING_ERROR_BYTES - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    Ok(String::from_utf8_lossy(&body).trim().to_owned())
 }
 
 fn map_inference_request_error(error: reqwest::Error) -> InferenceError {
@@ -547,6 +767,66 @@ mod tests {
             }
         );
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn probes_embedding_model_and_runs_a_bounded_smoke_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            respond(&listener, "GET", "/api/version", r#"{"version":"0.12.6"}"#);
+            respond(
+                &listener,
+                "GET",
+                "/api/tags",
+                r#"{"models":[{"name":"nomic-embed-text","model":"nomic-embed-text"}]}"#,
+            );
+            respond(
+                &listener,
+                "POST",
+                "/api/show",
+                r#"{"details":{"format":"gguf"},"model_info":{},"capabilities":["embedding"]}"#,
+            );
+            let (request, stream) = accept_http_request(&listener);
+            assert!(request.starts_with("POST /api/embed HTTP/1.1\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            let body: Value = serde_json::from_str(http_body(&request)).unwrap();
+            assert_eq!(body["model"], "nomic-embed-text");
+            assert_eq!(body["input"], json!(["Pinky embedding capability check"]));
+            write_http_response(
+                stream,
+                "200 OK",
+                r#"{"model":"nomic-embed-text","embeddings":[[1.0,0.0,0.0]]}"#,
+            )
+            .unwrap();
+        });
+
+        let client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "nomic-embed-text").unwrap();
+        assert_eq!(
+            client
+                .probe_embedding(&CancellationToken::new())
+                .await
+                .unwrap(),
+            OllamaEmbeddingRuntimeInfo {
+                model_name: "nomic-embed-text".into(),
+                dimensions: 3,
+                version: "0.12.6".into(),
+            }
+        );
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_a_completion_model_as_an_embedding_model() {
+        let result = probe_embedding_with_details(
+            r#"{"details":{"format":"gguf"},"model_info":{},"capabilities":["completion"]}"#,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(OllamaError::UnsupportedEmbeddingModel(_))
+        ));
     }
 
     #[tokio::test]
@@ -663,6 +943,37 @@ mod tests {
         assert_eq!(response.content, r#"{"answer":"grounded"}"#);
         assert_eq!(response.metrics.prompt_tokens, Some(12));
         assert_eq!(response.metrics.output_tokens, Some(7));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn sends_bounded_embedding_request_without_authentication() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (request, stream) = accept_http_request(&listener);
+            assert!(request.starts_with("POST /api/embed HTTP/1.1\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            let body: Value = serde_json::from_str(http_body(&request)).unwrap();
+            assert_eq!(body["model"], "nomic-embed-text");
+            assert_eq!(body["input"], json!(["first passage", "second passage"]));
+            write_http_response(
+                stream,
+                "200 OK",
+                r#"{"model":"nomic-embed-text","embeddings":[[1.0,0.0],[0.5,0.5]]}"#,
+            )
+            .unwrap();
+        });
+        let client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "nomic-embed-text").unwrap();
+        let inputs = vec!["first passage".to_owned(), "second passage".to_owned()];
+        let response = client
+            .embed(&inputs, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(response.model, "nomic-embed-text");
+        assert_eq!(response.vectors.len(), 2);
+        assert_eq!(response.vectors[1], vec![0.5, 0.5]);
         server.join().unwrap();
     }
 
@@ -906,6 +1217,28 @@ mod tests {
         let client =
             OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "tiny:latest").unwrap();
         let result = client.probe(&CancellationToken::new()).await;
+        server.join().unwrap();
+        result
+    }
+
+    async fn probe_embedding_with_details(
+        details: &'static str,
+    ) -> Result<OllamaEmbeddingRuntimeInfo, OllamaError> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            respond(&listener, "GET", "/api/version", r#"{"version":"0.12.6"}"#);
+            respond(
+                &listener,
+                "GET",
+                "/api/tags",
+                r#"{"models":[{"name":"tiny:latest","model":"tiny:latest"}]}"#,
+            );
+            respond(&listener, "POST", "/api/show", details);
+        });
+        let client =
+            OllamaClient::connect(&format!("http://127.0.0.1:{port}"), "tiny:latest").unwrap();
+        let result = client.probe_embedding(&CancellationToken::new()).await;
         server.join().unwrap();
         result
     }

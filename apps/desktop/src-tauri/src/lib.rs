@@ -9,15 +9,16 @@ use std::{
 use pinky_core::{
     answer_question_with_history, create_registered_vault, read_registration,
     unlock_registered_vault, AnswerEnvelopeV1, CitationPassage, ClaimSupportV1, ConversationDetail,
-    ConversationService, ConversationSummary, ConversationTurnV1, GocryptfsMount, InferenceError,
-    InferenceFuture, InferenceProvider, LlamaClient, LlamaError, LocalFileFingerprint,
-    LocalIngestor, LocalWatchTarget, MessageDraft, ObjectStore, OllamaClient, OllamaError,
-    OllamaRuntimeInfo, OnboardedVault, QaError, RetrievalService, SearchHit, SourceSummary,
-    StructuredGenerationRequest, SystemVaultPlatform, TaskJournal, TaskManager, VaultPaths,
+    ConversationService, ConversationSummary, ConversationTurnV1, EmbeddingIndexer, GocryptfsMount,
+    HybridConfiguration, InferenceError, InferenceFuture, InferenceProvider, LlamaClient,
+    LlamaError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget, MessageDraft, ObjectStore,
+    OllamaClient, OllamaError, OllamaRuntimeInfo, OnboardedVault, QaError, QdrantLaunchConfig,
+    QdrantSidecar, RetrievalService, SearchHit, SourceSummary, StructuredGenerationRequest,
+    SystemVaultPlatform, TaskContext, TaskJournal, TaskManager, Vault, VaultPaths,
     VaultRegistration,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -37,6 +38,8 @@ struct RuntimeStatus {
     model_name: Option<String>,
     model_context_size: Option<u64>,
     model_error: Option<String>,
+    hybrid_configured: bool,
+    hybrid_model: Option<String>,
     prerequisites: BTreeMap<&'static str, bool>,
 }
 
@@ -58,6 +61,22 @@ struct AttachedModel {
     model_name: String,
     context_size: u64,
     total_slots: u64,
+}
+
+struct HybridSearchConfig {
+    qdrant_executable: PathBuf,
+    embedding_endpoint: String,
+    embedding_model: String,
+    vault: Vault,
+    sidecar: Arc<tokio::sync::Mutex<HybridSidecarState>>,
+}
+
+const HYBRID_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[derive(Default)]
+struct HybridSidecarState {
+    sidecar: Option<QdrantSidecar>,
+    last_used: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -92,6 +111,7 @@ struct AppRuntime {
     data: Arc<Mutex<RuntimeData>>,
     registration_path: Arc<PathBuf>,
     watcher: Arc<Mutex<Option<CancellationToken>>>,
+    hybrid_sidecar: Arc<tokio::sync::Mutex<HybridSidecarState>>,
 }
 
 impl AppRuntime {
@@ -113,6 +133,7 @@ impl AppRuntime {
             })),
             registration_path: Arc::new(registration_path),
             watcher: Arc::new(Mutex::new(None)),
+            hybrid_sidecar: Arc::new(tokio::sync::Mutex::new(HybridSidecarState::default())),
         }
     }
 }
@@ -143,6 +164,13 @@ struct AttachOllamaRequest {
 }
 
 #[derive(Deserialize)]
+struct ConfigureHybridRequest {
+    qdrant_executable: PathBuf,
+    embedding_endpoint: String,
+    embedding_model: String,
+}
+
+#[derive(Deserialize)]
 struct AskQuestionRequest {
     question: String,
     conversation_id: Option<Uuid>,
@@ -168,6 +196,13 @@ struct AttachLlamaResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct HybridConfigurationResponse {
+    qdrant_executable: String,
+    embedding_endpoint: String,
+    embedding_model: String,
+}
+
+#[derive(Debug, Serialize)]
 struct SetupVaultResponse {
     vault_id: Uuid,
     recovery_path: PathBuf,
@@ -183,6 +218,29 @@ fn runtime_status(runtime: State<'_, AppRuntime>, tasks: State<'_, TaskManager>)
     if !mounted {
         invalidate_model_if_unmounted(&mut data, false);
     }
+    let stored_hybrid = data.vault.as_ref().and_then(|session| {
+        session
+            .database
+            .lock()
+            .ok()
+            .and_then(|database| database.hybrid_configuration().ok().flatten())
+    });
+    let hybrid = stored_hybrid.or_else(|| {
+        parse_hybrid_configuration(
+            env::var_os("PINKY_QDRANT_EXECUTABLE"),
+            env::var("PINKY_OLLAMA_EMBEDDING_ENDPOINT").ok(),
+            env::var("PINKY_OLLAMA_EMBEDDING_MODEL").ok(),
+        )
+        .ok()
+        .flatten()
+        .map(
+            |(qdrant_executable, embedding_endpoint, embedding_model)| HybridConfiguration {
+                qdrant_executable: qdrant_executable.to_string_lossy().into_owned(),
+                embedding_endpoint,
+                embedding_model,
+            },
+        )
+    });
     RuntimeStatus {
         vault_mounted: mounted,
         setup_in_progress: data.setup_in_progress,
@@ -207,6 +265,8 @@ fn runtime_status(runtime: State<'_, AppRuntime>, tasks: State<'_, TaskManager>)
             .map(|model| model.model_name.clone()),
         model_context_size: data.attached_model.as_ref().map(|model| model.context_size),
         model_error: data.model_error.clone(),
+        hybrid_configured: hybrid.is_some(),
+        hybrid_model: hybrid.map(|configuration| configuration.embedding_model),
         prerequisites: BTreeMap::from([
             ("gocryptfs", command_exists("gocryptfs")),
             ("podman", command_exists("podman")),
@@ -687,6 +747,391 @@ fn retrieval_service(runtime: &AppRuntime) -> Result<RetrievalService, String> {
     ))
 }
 
+fn hybrid_search_config(runtime: &AppRuntime) -> Result<Option<HybridSearchConfig>, String> {
+    let (vault, stored) = {
+        let data = runtime
+            .data
+            .lock()
+            .map_err(|_| "runtime lock is poisoned".to_owned())?;
+        let session = data
+            .vault
+            .as_ref()
+            .ok_or_else(|| "the encrypted vault is not unlocked".to_owned())?;
+        let stored = session
+            .database
+            .lock()
+            .map_err(|_| "vault database lock is poisoned".to_owned())?
+            .hybrid_configuration()
+            .map_err(|error| error.to_string())?;
+        (session.vault.clone(), stored)
+    };
+    vault.ensure_mounted().map_err(|error| error.to_string())?;
+    let configured = stored.map_or_else(
+        || {
+            parse_hybrid_configuration(
+                env::var_os("PINKY_QDRANT_EXECUTABLE"),
+                env::var("PINKY_OLLAMA_EMBEDDING_ENDPOINT").ok(),
+                env::var("PINKY_OLLAMA_EMBEDDING_MODEL").ok(),
+            )
+        },
+        |configuration| {
+            parse_hybrid_configuration(
+                Some(configuration.qdrant_executable.into()),
+                Some(configuration.embedding_endpoint),
+                Some(configuration.embedding_model),
+            )
+        },
+    )?;
+    let Some((executable, endpoint, model)) = configured else {
+        return Ok(None);
+    };
+    Ok(Some(HybridSearchConfig {
+        qdrant_executable: executable,
+        embedding_endpoint: endpoint,
+        embedding_model: model,
+        vault: vault.clone(),
+        sidecar: runtime.hybrid_sidecar.clone(),
+    }))
+}
+
+fn parse_hybrid_configuration(
+    executable: Option<std::ffi::OsString>,
+    endpoint: Option<String>,
+    model: Option<String>,
+) -> Result<Option<(PathBuf, String, String)>, String> {
+    if executable.is_none() && endpoint.is_none() && model.is_none() {
+        return Ok(None);
+    }
+    let (Some(executable), Some(endpoint), Some(model)) = (executable, endpoint, model) else {
+        return Err(
+            "hybrid retrieval requires PINKY_QDRANT_EXECUTABLE, PINKY_OLLAMA_EMBEDDING_ENDPOINT, and PINKY_OLLAMA_EMBEDDING_MODEL together".to_owned(),
+        );
+    };
+    let executable = PathBuf::from(executable);
+    if !executable.is_absolute() {
+        return Err("PINKY_QDRANT_EXECUTABLE must be an absolute path".to_owned());
+    }
+    let endpoint = endpoint.trim().to_owned();
+    let model = model.trim().to_owned();
+    if endpoint.is_empty() || model.is_empty() {
+        return Err("the hybrid Ollama endpoint and embedding model must not be empty".to_owned());
+    }
+    Ok(Some((executable, endpoint, model)))
+}
+
+#[tauri::command]
+fn get_hybrid_configuration(
+    runtime: State<'_, AppRuntime>,
+) -> Result<Option<HybridConfigurationResponse>, String> {
+    let data = runtime
+        .data
+        .lock()
+        .map_err(|_| "runtime lock is poisoned".to_owned())?;
+    let Some(session) = data.vault.as_ref() else {
+        return Err("unlock the encrypted vault before configuring hybrid retrieval".to_owned());
+    };
+    session
+        .vault
+        .ensure_mounted()
+        .map_err(|error| error.to_string())?;
+    let configuration = session
+        .database
+        .lock()
+        .map_err(|_| "vault database lock is poisoned".to_owned())?
+        .hybrid_configuration()
+        .map_err(|error| error.to_string())?;
+    let configuration = configuration.or_else(|| {
+        parse_hybrid_configuration(
+            env::var_os("PINKY_QDRANT_EXECUTABLE"),
+            env::var("PINKY_OLLAMA_EMBEDDING_ENDPOINT").ok(),
+            env::var("PINKY_OLLAMA_EMBEDDING_MODEL").ok(),
+        )
+        .ok()
+        .flatten()
+        .map(
+            |(qdrant_executable, embedding_endpoint, embedding_model)| HybridConfiguration {
+                qdrant_executable: qdrant_executable.to_string_lossy().into_owned(),
+                embedding_endpoint,
+                embedding_model,
+            },
+        )
+    });
+    Ok(
+        configuration.map(|configuration| HybridConfigurationResponse {
+            qdrant_executable: configuration.qdrant_executable,
+            embedding_endpoint: configuration.embedding_endpoint,
+            embedding_model: configuration.embedding_model,
+        }),
+    )
+}
+
+#[tauri::command]
+async fn configure_hybrid_retrieval(
+    request: ConfigureHybridRequest,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<(), String> {
+    let Some((qdrant_executable, embedding_endpoint, embedding_model)) =
+        parse_hybrid_configuration(
+            Some(request.qdrant_executable.clone().into_os_string()),
+            Some(request.embedding_endpoint.trim().to_owned()),
+            Some(request.embedding_model.trim().to_owned()),
+        )?
+    else {
+        return Err("hybrid retrieval configuration is incomplete".to_owned());
+    };
+    let (database, vault) = {
+        let data = runtime
+            .data
+            .lock()
+            .map_err(|_| "runtime lock is poisoned".to_owned())?;
+        let session = data.vault.as_ref().ok_or_else(|| {
+            "unlock the encrypted vault before configuring hybrid retrieval".to_owned()
+        })?;
+        session
+            .vault
+            .ensure_mounted()
+            .map_err(|error| error.to_string())?;
+        (session.database.clone(), session.vault.clone())
+    };
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tasks.spawn("hybrid setup", None, move |context| async move {
+        let outcome: Result<(), String> = async {
+            context.progress("hybrid setup", None, "Validating the local embedding model");
+            let embedding = OllamaClient::connect(&embedding_endpoint, &embedding_model)
+                .map_err(|error| error.to_string())?;
+            embedding
+                .probe_embedding(&context.cancellation_token())
+                .await
+                .map_err(|error| error.to_string())?;
+            context.progress(
+                "hybrid setup",
+                None,
+                "Starting Qdrant to verify the encrypted vector index",
+            );
+            let launch = QdrantLaunchConfig::new(&qdrant_executable, &vault)
+                .map_err(|error| error.to_string())?;
+            let sidecar = QdrantSidecar::start(launch)
+                .await
+                .map_err(|error| error.to_string())?;
+            sidecar
+                .shutdown()
+                .await
+                .map_err(|error| error.to_string())?;
+            context.progress(
+                "hybrid setup",
+                Some(0.9),
+                "Saving encrypted hybrid retrieval configuration",
+            );
+            database
+                .lock()
+                .map_err(|_| "vault database lock is poisoned".to_owned())?
+                .set_hybrid_configuration(&HybridConfiguration {
+                    qdrant_executable: qdrant_executable.to_string_lossy().into_owned(),
+                    embedding_endpoint,
+                    embedding_model,
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+        .await;
+        let task_result = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
+        let _ = sender.send(outcome);
+        task_result
+    });
+    receiver
+        .await
+        .map_err(|_| "hybrid setup task ended without a result".to_owned())?
+}
+
+#[tauri::command]
+async fn clear_hybrid_configuration(runtime: State<'_, AppRuntime>) -> Result<(), String> {
+    let (database, sidecar) = {
+        let data = runtime
+            .data
+            .lock()
+            .map_err(|_| "runtime lock is poisoned".to_owned())?;
+        let session = data.vault.as_ref().ok_or_else(|| {
+            "unlock the encrypted vault before configuring hybrid retrieval".to_owned()
+        })?;
+        session
+            .vault
+            .ensure_mounted()
+            .map_err(|error| error.to_string())?;
+        (session.database.clone(), runtime.hybrid_sidecar.clone())
+    };
+    database
+        .lock()
+        .map_err(|_| "vault database lock is poisoned".to_owned())?
+        .clear_hybrid_configuration()
+        .map_err(|error| error.to_string())?;
+    let mut state = sidecar.lock().await;
+    state.last_used = None;
+    if let Some(sidecar) = state.sidecar.take() {
+        sidecar
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+async fn retrieve_hits(
+    retrieval: RetrievalService,
+    query: String,
+    limit: usize,
+    cancellation: &CancellationToken,
+    hybrid: Option<HybridSearchConfig>,
+    progress: Option<TaskContext>,
+) -> Result<Vec<SearchHit>, String> {
+    let Some(config) = hybrid else {
+        return tauri::async_runtime::spawn_blocking(move || retrieval.search(&query, limit))
+            .await
+            .map_err(|error| format!("retrieval worker failed: {error}"))?
+            .map_err(|error| error.to_string());
+    };
+
+    if cancellation.is_cancelled() {
+        return Err("cancelled".to_owned());
+    }
+    if let Some(context) = &progress {
+        context.progress(
+            "hybrid retrieval",
+            None,
+            "Validating the local embedding model",
+        );
+    }
+    let embedding = OllamaClient::connect(&config.embedding_endpoint, &config.embedding_model)
+        .map_err(|error| error.to_string())?;
+    embedding
+        .probe_embedding(cancellation)
+        .await
+        .map_err(|error| error.to_string())?;
+    if cancellation.is_cancelled() {
+        return Err("cancelled".to_owned());
+    }
+    if let Some(context) = &progress {
+        context.progress(
+            "hybrid retrieval",
+            None,
+            "Starting the encrypted local vector index",
+        );
+    }
+    let qdrant = {
+        let mut state = config.sidecar.lock().await;
+        let reusable = if let Some(existing) = state.sidecar.take() {
+            if existing.client.health().await.is_ok() {
+                Some(existing)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(existing) = reusable {
+            let client = existing.client.clone();
+            state.sidecar = Some(existing);
+            state.last_used = Some(Instant::now());
+            client
+        } else {
+            let launch = QdrantLaunchConfig::new(&config.qdrant_executable, &config.vault)
+                .map_err(|error| error.to_string())?;
+            let started = QdrantSidecar::start(launch)
+                .await
+                .map_err(|error| error.to_string())?;
+            let client = started.client.clone();
+            state.sidecar = Some(started);
+            state.last_used = Some(Instant::now());
+            client
+        }
+    };
+    if let Some(context) = &progress {
+        context.progress(
+            "hybrid retrieval",
+            None,
+            "Embedding retained passages for the local vector index",
+        );
+    }
+    let indexer = EmbeddingIndexer::default();
+    let index_future = indexer.index_current_chunks(&embedding, &qdrant, &retrieval, cancellation);
+    tokio::pin!(index_future);
+    let index_started = Instant::now();
+    let mut index_heartbeat = tokio::time::interval(Duration::from_secs(2));
+    let indexed = loop {
+        tokio::select! {
+            biased;
+            result = &mut index_future => break result,
+            _ = index_heartbeat.tick() => if let Some(context) = &progress {
+                context.progress(
+                    "hybrid retrieval",
+                    None,
+                    format!(
+                        "Embedding retained passages for the local vector index ({}s elapsed)",
+                        index_started.elapsed().as_secs()
+                    ),
+                );
+            },
+        }
+    }
+    .map_err(|error| error.to_string());
+    let result = match indexed {
+        Ok(0) => Ok(Vec::new()),
+        Ok(indexed) => {
+            if let Some(context) = &progress {
+                context.progress(
+                    "hybrid retrieval",
+                    Some(0.8),
+                    format!(
+                        "Searching lexical and vector evidence across {indexed} indexed passage{}",
+                        if indexed == 1 { "" } else { "s" }
+                    ),
+                );
+            }
+            let search_future =
+                retrieval.search_hybrid(&query, limit, &embedding, &qdrant, cancellation);
+            tokio::pin!(search_future);
+            let search_started = Instant::now();
+            let mut search_heartbeat = tokio::time::interval(Duration::from_secs(2));
+            let hits = loop {
+                tokio::select! {
+                    biased;
+                    result = &mut search_future => break result,
+                    _ = search_heartbeat.tick() => if let Some(context) = &progress {
+                        context.progress(
+                            "hybrid retrieval",
+                            None,
+                            format!(
+                                "Searching lexical and vector evidence ({}s elapsed)",
+                                search_started.elapsed().as_secs()
+                            ),
+                        );
+                    },
+                }
+            };
+            hits.map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error),
+    };
+    schedule_hybrid_idle_shutdown(config.sidecar.clone());
+    result
+}
+
+fn schedule_hybrid_idle_shutdown(sidecar: Arc<tokio::sync::Mutex<HybridSidecarState>>) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(HYBRID_IDLE_TIMEOUT).await;
+        let mut state = sidecar.lock().await;
+        if state
+            .last_used
+            .is_some_and(|last_used| last_used.elapsed() >= HYBRID_IDLE_TIMEOUT)
+        {
+            if let Some(sidecar) = state.sidecar.take() {
+                let _ = sidecar.shutdown().await;
+            }
+            state.last_used = None;
+        }
+    });
+}
+
 fn conversation_service(runtime: &AppRuntime) -> Result<ConversationService, String> {
     let data = runtime
         .data
@@ -1007,22 +1452,49 @@ async fn search_sources(
         return Err("enter a search query".to_owned());
     }
     let retrieval = retrieval_service(runtime.inner())?;
+    let hybrid = hybrid_search_config(runtime.inner())?;
     let limit = limit.unwrap_or(8).clamp(1, 12);
+    let phase_name = if hybrid.is_some() {
+        "hybrid retrieval"
+    } else {
+        "lexical retrieval"
+    };
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    tasks.spawn("lexical retrieval", None, move |mut context| async move {
+    tasks.spawn(phase_name, None, move |mut context| async move {
         context
             .checkpoint()
             .await
             .map_err(|_| "cancelled".to_owned())?;
         context.progress(
-            "lexical retrieval",
+            phase_name,
             Some(0.15),
-            "Searching retained source passages",
+            if hybrid.is_some() {
+                "Preparing hybrid lexical and vector retrieval"
+            } else {
+                "Searching retained source passages"
+            },
         );
-        let outcome = tauri::async_runtime::spawn_blocking(move || retrieval.search(&query, limit))
-            .await
-            .map_err(|error| format!("retrieval worker failed: {error}"))
-            .and_then(|result| result.map_err(|error| error.to_string()));
+        let cancellation = context.cancellation_token();
+        let outcome = retrieve_hits(
+            retrieval,
+            query,
+            limit,
+            &cancellation,
+            hybrid,
+            Some(context.clone()),
+        )
+        .await;
+        if let Ok(hits) = &outcome {
+            context.progress(
+                phase_name,
+                Some(0.9),
+                format!(
+                    "Retrieved {} evidence passage{}",
+                    hits.len(),
+                    if hits.len() == 1 { "" } else { "s" }
+                ),
+            );
+        }
         let task_result = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
         let _ = sender.send(outcome);
         task_result
@@ -1081,6 +1553,7 @@ async fn ask_question(
             replaces_message_id: None,
         })
         .map_err(|error| error.to_string())?;
+    let hybrid = hybrid_search_config(runtime.inner())?;
     let (retrieval, provider, provider_name, model_name) = {
         let data = runtime
             .data
@@ -1110,104 +1583,148 @@ async fn ask_question(
     };
     let (sender, receiver) = tokio::sync::oneshot::channel();
     tasks.spawn("cited answer", None, move |mut context| async move {
-        context
-            .checkpoint()
-            .await
-            .map_err(|_| "cancelled".to_owned())?;
-        context.progress(
-            "cited answer",
-            Some(0.15),
-            "Retrieving current retained evidence",
-        );
-        let search_question = question.clone();
-        let hits =
-            tauri::async_runtime::spawn_blocking(move || retrieval.search(&search_question, 50))
+        // Keep every worker error on the response channel. In particular, an
+        // early retrieval/cancellation error must not leave the Tauri command
+        // waiting on a sender that was dropped by `?` before it could report
+        // the failure to the composer.
+        let outcome: Result<AnswerEnvelopeV1, String> = async {
+            context
+                .checkpoint()
                 .await
-                .map_err(|error| format!("retrieval worker failed: {error}"))?
-                .map_err(|error| error.to_string())?;
-        context
-            .checkpoint()
-            .await
-            .map_err(|_| "cancelled".to_owned())?;
-        context.progress(
-            "cited answer",
-            Some(0.35),
-            format!(
-                "Assembling {} retained evidence passage{}",
-                hits.len(),
-                if hits.len() == 1 { "" } else { "s" }
-            ),
-        );
-        context.progress(
-            "cited answer",
-            Some(0.45),
-            "Generating a source-grounded answer",
-        );
-        let cancellation = context.cancellation_token();
-        let retry_hits = hits.clone();
-        let mut qa_outcome = answer_question_with_history(
-            &provider,
-            context.id(),
-            &provider_name,
-            &model_name,
-            &question,
-            &conversation_history,
-            hits,
-            &cancellation,
-        )
-        .await;
-        if qa_outcome
-            .as_ref()
-            .is_err_and(|error| retryable_answer_error(error) && !cancellation.is_cancelled())
-        {
+                .map_err(|_| "cancelled".to_owned())?;
             context.progress(
                 "cited answer",
-                Some(0.7),
-                "Model connection failed; retrying once without duplicating the message",
+                Some(0.15),
+                if hybrid.is_some() {
+                    "Retrieving current lexical and vector evidence"
+                } else {
+                    "Retrieving current retained evidence"
+                },
             );
-            qa_outcome = answer_question_with_history(
+            let search_question = question.clone();
+            let cancellation = context.cancellation_token();
+            let hits = retrieve_hits(
+                retrieval,
+                search_question,
+                50,
+                &cancellation,
+                hybrid,
+                Some(context.clone()),
+            )
+            .await?;
+            context
+                .checkpoint()
+                .await
+                .map_err(|_| "cancelled".to_owned())?;
+            context.progress(
+                "cited answer",
+                Some(0.35),
+                format!(
+                    "Assembling {} retained evidence passage{}",
+                    hits.len(),
+                    if hits.len() == 1 { "" } else { "s" }
+                ),
+            );
+            context.progress("cited answer", None, "Generating a source-grounded answer");
+            let cancellation = context.cancellation_token();
+            let retry_hits = hits.clone();
+            let inference = answer_question_with_history(
                 &provider,
                 context.id(),
                 &provider_name,
                 &model_name,
                 &question,
                 &conversation_history,
-                retry_hits,
+                hits,
                 &cancellation,
-            )
-            .await;
-        }
-        let outcome = qa_outcome.map_err(|error| error.to_string());
-        let outcome = match outcome {
-            Ok(answer) => {
-                let citations = answer
-                    .summary_citations
-                    .iter()
-                    .chain(
-                        answer
-                            .claims
-                            .iter()
-                            .flat_map(|claim| claim.citations.iter()),
-                    )
-                    .cloned()
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                conversations
-                    .append_message(&MessageDraft {
-                        conversation_id,
-                        role: "assistant",
-                        content: &persisted_answer_content(&answer),
-                        model: Some(&model_name),
-                        citations: &citations,
-                        task_id: Some(context.id()),
-                        replaces_message_id: None,
-                    })
-                    .map(|_| answer)
-                    .map_err(|error| format!("validated answer could not be persisted: {error}"))
+            );
+            tokio::pin!(inference);
+            let inference_started = Instant::now();
+            let mut inference_heartbeat = tokio::time::interval(Duration::from_secs(2));
+            let mut qa_outcome = loop {
+                tokio::select! {
+                    biased;
+                    result = &mut inference => break result,
+                    _ = inference_heartbeat.tick() => context.progress(
+                        "cited answer",
+                        None,
+                        format!(
+                            "Generating a source-grounded answer from the local model ({}s elapsed)",
+                            inference_started.elapsed().as_secs()
+                        ),
+                    ),
+                }
+            };
+            if qa_outcome
+                .as_ref()
+                .is_err_and(|error| retryable_answer_error(error) && !cancellation.is_cancelled())
+            {
+                context.progress(
+                    "cited answer",
+                    Some(0.7),
+                    "Model connection failed; retrying once without duplicating the message",
+                );
+                let retry_inference = answer_question_with_history(
+                    &provider,
+                    context.id(),
+                    &provider_name,
+                    &model_name,
+                    &question,
+                    &conversation_history,
+                    retry_hits,
+                    &cancellation,
+                );
+                tokio::pin!(retry_inference);
+                let retry_started = Instant::now();
+                let mut retry_heartbeat = tokio::time::interval(Duration::from_secs(2));
+                qa_outcome = loop {
+                    tokio::select! {
+                        biased;
+                        result = &mut retry_inference => break result,
+                        _ = retry_heartbeat.tick() => context.progress(
+                            "cited answer",
+                            None,
+                            format!(
+                                "Retrying local model generation ({}s elapsed)",
+                                retry_started.elapsed().as_secs()
+                            ),
+                        ),
+                    }
+                };
             }
-            Err(error) => Err(error),
-        };
+            let answer = qa_outcome.map_err(|error| error.to_string())?;
+            context.progress(
+                "cited answer",
+                Some(0.85),
+                "Validating and saving the cited answer",
+            );
+            let citations = answer
+                .summary_citations
+                .iter()
+                .chain(
+                    answer
+                        .claims
+                        .iter()
+                        .flat_map(|claim| claim.citations.iter()),
+                )
+                .cloned()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            conversations
+                .append_message(&MessageDraft {
+                    conversation_id,
+                    role: "assistant",
+                    content: &persisted_answer_content(&answer),
+                    model: Some(&model_name),
+                    citations: &citations,
+                    task_id: Some(context.id()),
+                    replaces_message_id: None,
+                })
+                .map(|_| answer)
+                .map_err(|error| format!("validated answer could not be persisted: {error}"))
+        }
+        .await;
         let task_result = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
         let _ = sender.send(outcome.map(|answer| AskQuestionResponse {
             conversation_id,
@@ -1380,6 +1897,46 @@ fn command_exists(program: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn expression_debug_enabled_from<I>(args: I) -> bool
+where
+    I: IntoIterator<Item = String>,
+{
+    args.into_iter()
+        .any(|argument| argument == "--expression-debug")
+}
+
+#[tauri::command]
+fn expression_debug_enabled() -> bool {
+    expression_debug_enabled_from(env::args())
+}
+
+#[tauri::command]
+fn open_ambient_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("ambient") {
+        window
+            .set_ignore_cursor_events(false)
+            .map_err(|error| error.to_string())?;
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        app.emit_to("ambient", "pinky://ambient-configure", ())
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "ambient")
+        .ok_or_else(|| "ambient window configuration is missing".to_owned())?;
+    let window = WebviewWindowBuilder::from_config(&app, config)
+        .map_err(|error| error.to_string())?
+        .build()
+        .map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1423,6 +1980,9 @@ pub fn run() {
             start_system_check,
             ingest_local_file,
             list_sources,
+            get_hybrid_configuration,
+            configure_hybrid_retrieval,
+            clear_hybrid_configuration,
             search_sources,
             ask_question,
             list_conversations,
@@ -1434,7 +1994,9 @@ pub fn run() {
             cancel_task,
             pause_task,
             cancel_all_tasks,
-            task_snapshot
+            task_snapshot,
+            expression_debug_enabled,
+            open_ambient_window
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Pinky desktop application");
@@ -1454,6 +2016,46 @@ mod desktop_tests {
             modified_seconds: 100,
             modified_nanoseconds,
         }
+    }
+
+    #[test]
+    fn expression_debug_requires_an_explicit_launch_argument() {
+        assert!(expression_debug_enabled_from([
+            "pinky-desktop".to_owned(),
+            "--expression-debug".to_owned(),
+        ]));
+        assert!(!expression_debug_enabled_from(["pinky-desktop".to_owned()]));
+    }
+
+    #[test]
+    fn hybrid_configuration_is_disabled_without_opt_in_values() {
+        assert!(parse_hybrid_configuration(None, None, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn hybrid_configuration_requires_all_values_and_safe_paths() {
+        let missing = parse_hybrid_configuration(
+            Some("/usr/bin/qdrant".into()),
+            Some("http://127.0.0.1:11434".into()),
+            None,
+        );
+        assert!(missing.is_err());
+
+        let relative = parse_hybrid_configuration(
+            Some("qdrant".into()),
+            Some("http://127.0.0.1:11434".into()),
+            Some("nomic-embed-text".into()),
+        );
+        assert!(relative.is_err());
+
+        let empty = parse_hybrid_configuration(
+            Some("/usr/bin/qdrant".into()),
+            Some("  ".into()),
+            Some("nomic-embed-text".into()),
+        );
+        assert!(empty.is_err());
     }
 
     #[test]

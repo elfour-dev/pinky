@@ -12,6 +12,7 @@
     "test:clean-install": "node scripts/test-clean-debian-install.mjs",
     "test:e2e": "npm run build:native:test && xvfb-run -a npm --prefix e2e test",
     "verify:bundle": "node scripts/verify-linux-bundle.mjs",
+    "inspect:plaintext": "node scripts/inspect-plaintext.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

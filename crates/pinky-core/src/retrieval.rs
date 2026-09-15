@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     sync::{Arc, Mutex},
 };
@@ -12,11 +13,18 @@ use tantivy::{
     Index, IndexReader, ReloadPolicy, TantivyError, Term,
 };
 use thiserror::Error;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{Database, ObjectStore, ObjectStoreError, VaultError};
+use crate::{
+    embedding::{EmbeddingError, EmbeddingProvider},
+    hybrid::{reciprocal_rank_fusion, RankedChunk},
+    qdrant::{QdrantClient, QdrantError, VectorMatch},
+    Database, ObjectStore, ObjectStoreError, VaultError,
+};
 
 const WRITER_MEMORY_BYTES: usize = 15_000_000;
+pub const HYBRID_CANDIDATE_LIMIT: usize = 50;
 
 #[derive(Debug, Error)]
 pub enum RetrievalError {
@@ -38,6 +46,18 @@ pub enum RetrievalError {
     CitationNotFound,
     #[error("retained chunk is not valid UTF-8")]
     InvalidChunkText,
+}
+
+#[derive(Debug, Error)]
+pub enum HybridRetrievalError {
+    #[error("hybrid retrieval was cancelled")]
+    Cancelled,
+    #[error("lexical retrieval failed: {0}")]
+    Retrieval(#[from] RetrievalError),
+    #[error("query embedding failed: {0}")]
+    Embedding(#[from] EmbeddingError),
+    #[error("vector retrieval failed: {0}")]
+    Qdrant(#[from] QdrantError),
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +199,137 @@ impl RetrievalService {
         Ok(hits)
     }
 
+    pub fn current_chunks(&self) -> Result<Vec<IndexedChunk>, RetrievalError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RetrievalError::DatabaseLock)?;
+        let mut statement = database.connection().prepare(
+            "SELECT c.id, s.id, v.id, c.ordinal, s.display_name, c.heading_path,
+                    c.extracted_text_hash
+             FROM chunks c
+             JOIN source_versions v ON v.id = c.source_version_id
+             JOIN sources s ON s.id = v.source_id
+             WHERE s.current_version_id = v.id
+               AND s.state NOT IN ('deleted', 'unsupported')
+             ORDER BY v.id, c.ordinal",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(IndexedChunk {
+                    chunk_id: parse_uuid(&row.0)?,
+                    source_id: parse_uuid(&row.1)?,
+                    version_id: parse_uuid(&row.2)?,
+                    ordinal: row.3 as u64,
+                    display_name: row.4,
+                    heading: row.5,
+                    body: String::from_utf8(self.objects.read_verified(&row.6)?)
+                        .map_err(|_| RetrievalError::InvalidChunkText)?,
+                })
+            })
+            .collect()
+    }
+
+    pub fn merge_hybrid_hits(
+        &self,
+        lexical: &[SearchHit],
+        vector: &[VectorMatch],
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, RetrievalError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let lexical_ranked = lexical
+            .iter()
+            .map(|hit| RankedChunk {
+                chunk_id: hit.chunk_id,
+                source_version_id: hit.version_id,
+                score: hit.score,
+            })
+            .collect::<Vec<_>>();
+        let vector_ranked = vector
+            .iter()
+            .map(|hit| RankedChunk {
+                chunk_id: hit.id,
+                source_version_id: hit.source_version_id,
+                score: hit.score,
+            })
+            .collect::<Vec<_>>();
+        let mut hits_by_id = lexical
+            .iter()
+            .cloned()
+            .map(|hit| (hit.chunk_id, hit))
+            .collect::<HashMap<_, _>>();
+        for candidate in vector {
+            if hits_by_id.contains_key(&candidate.id) {
+                continue;
+            }
+            if let Some(hit) = self.load_current_hit(candidate.id)? {
+                hits_by_id.insert(candidate.id, hit);
+            }
+        }
+        Ok(
+            reciprocal_rank_fusion(&lexical_ranked, &vector_ranked, limit)
+                .into_iter()
+                .filter_map(|candidate| {
+                    hits_by_id.remove(&candidate.chunk_id).map(|mut hit| {
+                        hit.score = candidate.fused_score;
+                        hit
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    pub async fn search_hybrid<P: EmbeddingProvider + ?Sized>(
+        &self,
+        query: &str,
+        limit: usize,
+        provider: &P,
+        qdrant: &QdrantClient,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<SearchHit>, HybridRetrievalError> {
+        if query.trim().is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        if cancellation.is_cancelled() {
+            return Err(HybridRetrievalError::Cancelled);
+        }
+
+        let lexical = self.search(query, HYBRID_CANDIDATE_LIMIT)?;
+        let response = provider.embed(&[query.to_owned()], cancellation).await?;
+        let query_vector = response
+            .vectors
+            .into_iter()
+            .next()
+            .ok_or(EmbeddingError::InvalidVectors)?;
+
+        if cancellation.is_cancelled() {
+            return Err(HybridRetrievalError::Cancelled);
+        }
+        let vector = tokio::select! {
+            _ = cancellation.cancelled() => return Err(HybridRetrievalError::Cancelled),
+            result = qdrant.query(&query_vector, HYBRID_CANDIDATE_LIMIT) => result?,
+        };
+        if cancellation.is_cancelled() {
+            return Err(HybridRetrievalError::Cancelled);
+        }
+        Ok(self.merge_hybrid_hits(&lexical, &vector, limit)?)
+    }
+
     pub fn open_citation(&self, uri: &str) -> Result<CitationPassage, RetrievalError> {
         let (source_id, version_id, ordinal) = parse_citation_uri(uri)?;
         let database = self
@@ -276,6 +427,70 @@ impl RetrievalService {
             });
         }
         lexical.rebuild(&chunks)
+    }
+
+    fn load_current_hit(&self, chunk_id: Uuid) -> Result<Option<SearchHit>, RetrievalError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RetrievalError::DatabaseLock)?;
+        let row = database
+            .connection()
+            .query_row(
+                "SELECT s.id, v.id, c.id, c.ordinal, s.display_name, c.heading_path,
+                        c.extracted_text_hash, c.coordinates_json, v.retrieved_at
+                 FROM chunks c
+                 JOIN source_versions v ON v.id = c.source_version_id
+                 JOIN sources s ON s.id = v.source_id
+                 WHERE c.id = ?1 AND s.current_version_id = v.id
+                   AND s.state NOT IN ('deleted', 'unsupported')",
+                [chunk_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            source_id,
+            version_id,
+            chunk_id,
+            ordinal,
+            display_name,
+            heading,
+            hash,
+            coordinates,
+            retrieved_at,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let source_id = parse_uuid(&source_id)?;
+        let version_id = parse_uuid(&version_id)?;
+        let chunk_id = parse_uuid(&chunk_id)?;
+        Ok(Some(SearchHit {
+            score: 0.0,
+            citation_uri: citation_uri(source_id, version_id, ordinal as u64),
+            source_id,
+            version_id,
+            chunk_id,
+            ordinal: ordinal as u64,
+            display_name,
+            heading,
+            passage: String::from_utf8(self.objects.read_verified(&hash)?)
+                .map_err(|_| RetrievalError::InvalidChunkText)?,
+            coordinates: parse_coordinates(coordinates.as_deref()),
+            retrieved_at,
+        }))
     }
 }
 
@@ -516,6 +731,12 @@ mod tests {
         let ingestor = crate::LocalIngestor::new(database.clone(), objects.clone());
         ingestor.ingest(approved.path(), &path).unwrap();
         let retrieval = RetrievalService::new(database, objects);
+        let retained = retrieval.current_chunks().unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(
+            retained[0].body,
+            "Pinky stores exact retained passages about lunar geology."
+        );
         let hits = retrieval.search("lunar geology", 10).unwrap();
         assert_eq!(hits.len(), 1);
         let passage = retrieval.open_citation(&hits[0].citation_uri).unwrap();
@@ -524,5 +745,45 @@ mod tests {
             "Pinky stores exact retained passages about lunar geology."
         );
         assert_eq!(passage.version_id, hits[0].version_id);
+    }
+
+    #[test]
+    fn merges_lexical_and_vector_hits_without_losing_citations() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(root.path(), Mounted).unwrap();
+        let database = Arc::new(Mutex::new(
+            Database::open(&vault, Zeroizing::new(vec![0x42; 32])).unwrap(),
+        ));
+        let retrieval = RetrievalService::new(database, ObjectStore::new(vault));
+        let source_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let chunk_id = Uuid::new_v4();
+        let citation_uri = citation_uri(source_id, version_id, 2);
+        let merged = retrieval
+            .merge_hybrid_hits(
+                &[SearchHit {
+                    score: 2.0,
+                    citation_uri: citation_uri.clone(),
+                    source_id,
+                    version_id,
+                    chunk_id,
+                    ordinal: 2,
+                    display_name: "notes.md".into(),
+                    heading: Some("Heading".into()),
+                    passage: "Retained passage".into(),
+                    coordinates: serde_json::json!({"line_start": 3}),
+                    retrieved_at: "2026-09-15T00:00:00Z".into(),
+                }],
+                &[VectorMatch {
+                    id: chunk_id,
+                    source_version_id: version_id,
+                    score: 0.98,
+                }],
+                1,
+            )
+            .unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].citation_uri, citation_uri);
+        assert!(merged[0].score > 0.0);
     }
 }
