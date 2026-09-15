@@ -6,6 +6,7 @@ import { Terminal } from "@xterm/xterm";
 import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
+import { isReconnectableError } from "./reliability";
 import type { AnswerEnvelope, AskQuestionResponse, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
 import { canAsk } from "./types";
 
@@ -27,7 +28,7 @@ function ActivityTerminal({ events }: { events: TaskEvent[] }) {
     for (const event of events.slice(written.current)) terminal.current?.writeln(`${String(event.sequence).padStart(4, "0")}  ${event.state.padEnd(12)}  ${event.phase.activity}`);
     written.current = events.length;
   }, [events]);
-  return <div className="terminal" ref={target} aria-label="Task event log" />;
+  return <div className="terminal" ref={target} role="log" aria-live="polite" aria-label="Task event log" />;
 }
 
 export function App() {
@@ -325,7 +326,7 @@ export function App() {
         {!status.vault_mounted && (status.vault_registered ? <div className="blocking-question" role="alert"><KeyRound size={19} /><div><strong>{status.setup_in_progress ? "Unlocking your encrypted vault" : "Your registered vault is locked"}</strong><p>{status.unlock_error || "Pinky is retrieving its protected key from Linux Secret Service."}</p></div><button disabled={status.setup_in_progress || !status.prerequisites.gocryptfs || !status.prerequisites.secret_service} onClick={retryUnlock}>{status.setup_in_progress ? "Unlocking…" : "Retry unlock"}</button></div> : <div className="blocking-question" role="alert"><FolderKey size={19} /><div><strong>Set up the encrypted vault to begin</strong><p>Ingestion, conversations, generation, and logs stay disabled until gocryptfs and Secret Service are ready.</p></div><button onClick={openSetup}>Start setup</button></div>)}
         {status.vault_mounted && mode === "search" && !searchHits.length && <div className="capability-notice"><Database size={17} /><div><strong>Encrypted source search is ready</strong><p>Add local text sources, then search their retained passages below. Ask mode uses the attached local model and cites this retained evidence.</p></div><button onClick={openSource}>Add source</button></div>}
         {status.vault_mounted && mode === "ask" && !answer && <div className="capability-notice"><MessageSquare size={17} /><div><strong>{status.model_connected ? "Cited answers are ready" : "Attach a local model to ask"}</strong><p>{status.model_connected ? (sources.length ? "Ask a question and Pinky will retrieve, validate, and cite retained passages." : "Add at least one retained source before asking a question.") : "Ask mode never falls back to general knowledge; connect Ollama or llama-server in the runtime panel."}</p></div><button onClick={sources.length ? openModel : openSource}>{sources.length ? "Attach model" : "Add source"}</button></div>}
-        {(searchError || askError) && <p className="search-error" role="alert">{searchError || askError}</p>}
+        {(searchError || askError) && <div className="error-panel" role="alert"><p className="search-error">{searchError || askError}</p>{askError && isReconnectableError(askError) && <button className="reconnect-button" onClick={openModel}><Cpu size={13} /> Reconnect local model</button>}</div>}
         {answer && <AnswerView answer={answer} onCitation={(uri) => void showCitation(uri)} />}
         {!!searchHits.length && <section className="search-results" aria-label="Retained source search results"><header><p className="eyebrow">MATCHING EVIDENCE</p><span>{searchHits.length} passage{searchHits.length === 1 ? "" : "s"}</span></header>{searchHits.map((hit) => <article key={hit.chunk_id}><div><FileText size={14} /><strong>{hit.display_name}</strong>{hit.heading && <span>{hit.heading}</span>}</div><p>{hit.passage}</p><button onClick={() => void showCitation(hit.citation_uri)}>{formatCoordinates(hit.coordinates)} · Open retained citation</button></article>)}</section>}
       </div>

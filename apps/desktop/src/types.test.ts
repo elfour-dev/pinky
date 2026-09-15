@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { canAsk } from "./types";
+import { isReconnectableError } from "./reliability";
 import type { RuntimeStatus } from "./types";
 
 const status: RuntimeStatus = {
@@ -26,5 +27,13 @@ describe("Ask mode enablement", () => {
     expect(canAsk({ ...status, model_connected: false }, "What does this say?", 1)).toBe(false);
     expect(canAsk(status, "What does this say?", 0)).toBe(false);
     expect(canAsk(status, "   ", 1)).toBe(false);
+  });
+});
+
+describe("model reconnect errors", () => {
+  it("recognizes transport failures without treating validation errors as reconnects", () => {
+    expect(isReconnectableError("inference server is unavailable: tunnel closed")).toBe(true);
+    expect(isReconnectableError("inference timed out")).toBe(true);
+    expect(isReconnectableError("model answer remained invalid after one repair attempt")).toBe(false);
   });
 });

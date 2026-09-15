@@ -12,7 +12,7 @@ use pinky_core::{
     ConversationService, ConversationSummary, ConversationTurnV1, GocryptfsMount, InferenceError,
     InferenceFuture, InferenceProvider, LlamaClient, LlamaError, LocalFileFingerprint,
     LocalIngestor, LocalWatchTarget, MessageDraft, ObjectStore, OllamaClient, OllamaError,
-    OllamaRuntimeInfo, OnboardedVault, RetrievalService, SearchHit, SourceSummary,
+    OllamaRuntimeInfo, OnboardedVault, QaError, RetrievalService, SearchHit, SourceSummary,
     StructuredGenerationRequest, SystemVaultPlatform, TaskJournal, TaskManager, VaultPaths,
     VaultRegistration,
 };
@@ -1144,7 +1144,8 @@ async fn ask_question(
             "Generating a source-grounded answer",
         );
         let cancellation = context.cancellation_token();
-        let outcome = answer_question_with_history(
+        let retry_hits = hits.clone();
+        let mut qa_outcome = answer_question_with_history(
             &provider,
             context.id(),
             &provider_name,
@@ -1154,8 +1155,29 @@ async fn ask_question(
             hits,
             &cancellation,
         )
-        .await
-        .map_err(|error| error.to_string());
+        .await;
+        if qa_outcome
+            .as_ref()
+            .is_err_and(|error| retryable_answer_error(error) && !cancellation.is_cancelled())
+        {
+            context.progress(
+                "cited answer",
+                Some(0.7),
+                "Model connection failed; retrying once without duplicating the message",
+            );
+            qa_outcome = answer_question_with_history(
+                &provider,
+                context.id(),
+                &provider_name,
+                &model_name,
+                &question,
+                &conversation_history,
+                retry_hits,
+                &cancellation,
+            )
+            .await;
+        }
+        let outcome = qa_outcome.map_err(|error| error.to_string());
         let outcome = match outcome {
             Ok(answer) => {
                 let citations = answer
@@ -1290,6 +1312,17 @@ fn persisted_answer_content(answer: &AnswerEnvelopeV1) -> String {
         }
     }
     content.trim_end().to_owned()
+}
+
+fn retryable_answer_error(error: &QaError) -> bool {
+    matches!(
+        error,
+        QaError::Inference(
+            InferenceError::Unavailable(_)
+                | InferenceError::Timeout
+                | InferenceError::Rejected { .. }
+        )
+    )
 }
 
 #[tauri::command]
@@ -1610,5 +1643,24 @@ mod desktop_tests {
         );
         assert!(data.attached_model.is_none());
         assert_eq!(data.model_error.as_deref(), Some("invalid model response"));
+    }
+
+    #[test]
+    fn retries_only_recoverable_model_transport_failures() {
+        assert!(retryable_answer_error(&QaError::Inference(
+            InferenceError::Unavailable("tunnel closed".into()),
+        )));
+        assert!(retryable_answer_error(&QaError::Inference(
+            InferenceError::Timeout,
+        )));
+        assert!(retryable_answer_error(&QaError::Inference(
+            InferenceError::Rejected {
+                status: 503,
+                body: "busy".into(),
+            },
+        )));
+        assert!(!retryable_answer_error(&QaError::RepairFailed(
+            "invalid answer"
+        )));
     }
 }

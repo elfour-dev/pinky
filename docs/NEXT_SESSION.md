@@ -48,6 +48,14 @@ assistant message only after validation, and supports encrypted create/select/
 rename/delete interactions. The direct filesystem plaintext inspection remains
 an opt-in release check.
 
+R6 reliability implementation is now complete: interrupted task journals
+recover as `failed_interrupted`, recoverable model transport failures receive
+one bounded retry without duplicate assistant messages, and the Ask error path
+offers local-model reconnect guidance. Existing encrypted task journals retain
+bounded diagnostics; keyboard/live-region, reduced-motion, and non-WebGL paths
+remain enabled. The clean-account packaging check, offline target-host
+demonstration, and direct plaintext inspection are still release gates.
+
 ## Verification completed
 
 - `cargo fmt --all --check`: passed
@@ -65,12 +73,11 @@ The deterministic fake llama-server test needs loopback permission; the
 restricted filesystem sandbox returned `EPERM`, and the same suite passed when
 run with explicit local-loopback permission.
 
-## Next implementation slice: R6 Pinky Lite reliability and acceptance
+## Next implementation slice: R6 release acceptance
 
-Run the offline reliability and release acceptance work described in
-`CITED_QA_PHASES.md`: interrupted-task recovery, reconnect/retry behavior,
-bounded encrypted diagnostics, accessibility acceptance, packaging checks, and
-the clean-account target-host demonstration.
+Run the remaining opt-in release checks described in `CITED_QA_PHASES.md`:
+the clean-account Ollama packaging path, offline target-host tutorial
+demonstration, direct plaintext inspection, and full R0-R6 acceptance ledger.
 
 ## Orientation commands
 

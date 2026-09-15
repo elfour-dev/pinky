@@ -46,6 +46,9 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
 - [ ] Workspace snapshots, permissions, Podman tools, and app generation
 - [ ] Image generation, accessibility acceptance, backup, packaging, upgrades
+- [x] Pinky Lite reliability path: interrupted-task recovery, bounded retry for
+  recoverable model transport failures, reconnect guidance, and validated
+  cancellation/error handling
 
 ## Verification on this checkout
 
@@ -175,6 +178,15 @@ last eight messages, persists an assistant message only after R3 validation,
 and exposes encrypted create/select/rename/delete controls. Invalid or
 cancelled inference never creates a completed assistant message. A direct
 filesystem plaintext inspection remains a release acceptance check.
+
+R6 completes the automated Pinky Lite reliability path. Existing encrypted task
+journals recover interrupted work as `failed_interrupted`; cited answers retry
+once only for recoverable transport failures, without creating duplicate
+assistant messages. Transport failures expose a reconnect action, while task
+events and bounded provider error bodies remain encrypted diagnostics. The
+desktop retains keyboard navigation, live announcements, reduced-motion
+support, and a non-WebGL text fallback. Clean-account packaging, target-host
+offline demonstration, and direct plaintext inspection remain release checks.
 
 The onboarding transaction is covered through a platform test double, including
 authenticated recovery, path and symlink boundaries, SQLCipher creation, and

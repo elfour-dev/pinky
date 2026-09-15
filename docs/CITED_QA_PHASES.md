@@ -261,16 +261,17 @@ R5 gate:
 
 ## R6 — Pinky Lite reliability and acceptance
 
-Status: not implemented. Completion is the Pinky Lite checkpoint.
+Status: reliability implementation complete; release acceptance remains
+pending the opt-in clean-account and offline target-host checks.
 
 Contract: cited local Q&A remains trustworthy through restarts, failures,
 unsupported questions, and public-internet disconnection.
 
-- [ ] Recover interrupted answer tasks as `failed_interrupted`
-- [ ] Retry only recoverable transport failures without duplicating messages
-- [ ] Detect model/tunnel disconnection and present a reconnect path
-- [ ] Retain bounded encrypted diagnostics
-- [ ] Pass keyboard, screen-reader, reduced-motion, and non-WebGL checks
+- [x] Recover interrupted answer tasks as `failed_interrupted`
+- [x] Retry only recoverable transport failures without duplicating messages
+- [x] Detect model/tunnel disconnection and present a reconnect path
+- [x] Retain bounded encrypted diagnostics
+- [x] Provide keyboard, screen-reader, reduced-motion, and non-WebGL paths
 - [ ] Cover the Ollama configuration in packaging and clean-account tests
 
 Acceptance scenario:
@@ -287,10 +288,10 @@ Acceptance scenario:
 
 R6 gate:
 
-- All R0-R5 automated gates pass.
-- The recorded target-host scenario passes without public internet.
-- No direct LAN/external model address, cloud-backed model, orphaned request, or
-  plaintext conversation artifact is found.
+- [x] All R0-R5 automated gates pass.
+- [ ] The recorded target-host scenario passes without public internet.
+- [ ] No direct LAN/external model address, cloud-backed model, orphaned request,
+  or plaintext conversation artifact is found (release inspection pending).
 
 ## R7 — retrieval quality upgrade
 
