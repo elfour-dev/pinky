@@ -30,6 +30,6 @@ export function AsciiEntity({ state, reducedMotion }: { state: EntityState; redu
     };
     render(); return () => { cancelAnimationFrame(animation); geometry.dispose(); material.dispose(); renderer.dispose(); };
   }, [fallback, reducedMotion, state]);
-  if (fallback) return <div className="entity-fallback" role="img" aria-label={`Pinky is ${state}`}><pre>{["  .-~~~~-.", " /  *  *  \\", "|    ~     |", " \\  ___  /", "  '-.__.-'"].join("\n")}</pre></div>;
-  return <canvas ref={canvasRef} className="entity-canvas" role="img" aria-label={`Pinky is ${state}`} />;
+  if (fallback) return <div className="entity-fallback" role="img" aria-label={`ALMA is ${state}`}><pre>{["  .-~~~~-.", " /  *  *  \\", "|    ~     |", " \\  ___  /", "  '-.__.-'"].join("\n")}</pre></div>;
+  return <canvas ref={canvasRef} className="entity-canvas" role="img" aria-label={`ALMA is ${state}`} />;
 }

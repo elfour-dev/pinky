@@ -1,11 +1,14 @@
 # Pinky
 
-Pinky is a private, source-grounded Linux desktop assistant. This repository is
-being delivered in six acceptance-gated stages; it is not yet a version-one
-release.
+**Pinky is the project's working title, not the final application name.** The
+project is a private, source-grounded Linux desktop assistant being delivered in
+six acceptance-gated stages; it is not yet a version-one release. Package,
+executable, and repository identifiers retain the working title until a final
+name is selected.
 
 Planning and resumption documents:
 
+- [Product and avatar identity](docs/IDENTITY.md)
 - [Vault setup and usage guide](docs/VAULT_GUIDE.md)
 - [Hands-on vault tutorial and example sources](docs/VAULT_TUTORIAL.md)
 - [Cited local Q&A delivery phases](docs/CITED_QA_PHASES.md)
@@ -69,9 +72,9 @@ Ollama instance or an authenticated llama.cpp server. After vault unlock, open
   against the protected `/props` endpoint.
 
 Both providers must use an explicit IPv4 loopback port; Pinky bypasses ambient
-HTTP proxies. Attaching a model does not enable chat yet: supervised
-`llama-server` launch and the validated answer contract remain gated work in
-`docs/CITED_QA_PHASES.md`.
+HTTP proxies. Attaching a model does not enable chat yet: the validated answer
+contract is complete in the Rust core, but its desktop integration remains the
+R4 gate in `docs/CITED_QA_PHASES.md`.
 
 ## Setup on Debian or Ubuntu
 

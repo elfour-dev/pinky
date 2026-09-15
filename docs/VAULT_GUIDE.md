@@ -300,8 +300,10 @@ data; preserve the vault for the planned recovery interface.
 - Active ingestion and system-check operations appear in the right panel.
 - Use **Pause**, **Resume**, or **Stop** when those controls are offered.
 - **Stop all** cancels all currently cancellable operations.
-- The animated ASCII entity reflects actual task state; it is not itself an AI
-  model.
+- The animated ASCII entity is named **ALMA**, short for **Archived Local Memory
+  Assistant**. ALMA reflects actual task state; she is the visible face of the
+  application, not a separate AI model or evidence source. Pinky remains the
+  application's working title until a final product name is selected.
 - **New conversation**, dossiers, workspace automation, generated content, and
   public-web research are present only as future-facing UI or planned stages.
 - The current build has no supported backup, restore, source purge, or vault
