@@ -5,6 +5,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use reqwest::StatusCode;
 use ring::signature::{self, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -54,6 +55,10 @@ pub enum ArtifactError {
     DestinationExists(PathBuf),
     #[error("artifact I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("artifact download request failed: {0}")]
+    Download(#[from] reqwest::Error),
+    #[error("artifact download returned HTTP {0}")]
+    DownloadStatus(StatusCode),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,6 +194,92 @@ impl ArtifactManifestV1 {
             }
             Ok(digest)
         })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    /// Download this immutable manifest URL and install it atomically after
+    /// checking the declared size and SHA-256. Redirects are not followed: a
+    /// signed URL must be the URL that is actually fetched.
+    pub async fn download_and_install(
+        &self,
+        destination: impl AsRef<Path>,
+    ) -> Result<ArtifactDigest, ArtifactError> {
+        self.validate()?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let destination = destination.as_ref();
+        if !destination.is_absolute() {
+            return Err(ArtifactError::InvalidDestination(destination.to_owned()));
+        }
+        if fs::symlink_metadata(destination).is_ok() {
+            return Err(ArtifactError::DestinationExists(destination.to_owned()));
+        }
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| ArtifactError::InvalidDestination(destination.to_owned()))?;
+        let parent_metadata = fs::symlink_metadata(parent)?;
+        if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+            return Err(ArtifactError::InvalidDestination(parent.to_owned()));
+        }
+
+        let response = client.get(&self.url).send().await?;
+        if !response.status().is_success() {
+            return Err(ArtifactError::DownloadStatus(response.status()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length != self.byte_size)
+        {
+            return Err(ArtifactError::SizeMismatch {
+                found: response.content_length().unwrap_or_default(),
+                expected: self.byte_size,
+            });
+        }
+
+        let temporary = parent.join(format!(".pinky-artifact-{}.partial", Uuid::new_v4()));
+        let result = async {
+            let mut output = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .await?;
+            let mut response = response;
+            let mut bytes = 0_u64;
+            while let Some(chunk) = response.chunk().await? {
+                bytes = bytes.saturating_add(chunk.len() as u64);
+                if bytes > self.byte_size {
+                    return Err(ArtifactError::SizeMismatch {
+                        found: bytes,
+                        expected: self.byte_size,
+                    });
+                }
+                tokio::io::AsyncWriteExt::write_all(&mut output, &chunk).await?;
+            }
+            if bytes != self.byte_size {
+                return Err(ArtifactError::SizeMismatch {
+                    found: bytes,
+                    expected: self.byte_size,
+                });
+            }
+            tokio::io::AsyncWriteExt::flush(&mut output).await?;
+            output.sync_all().await?;
+            drop(output);
+            let digest = self.verify_file(&temporary)?;
+            if fs::symlink_metadata(destination).is_ok() {
+                return Err(ArtifactError::DestinationExists(destination.to_owned()));
+            }
+            fs::rename(&temporary, destination)?;
+            if let Ok(directory) = File::open(parent) {
+                let _ = directory.sync_all();
+            }
+            Ok(digest)
+        }
+        .await;
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
         }

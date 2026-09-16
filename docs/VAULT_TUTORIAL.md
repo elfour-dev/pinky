@@ -202,8 +202,9 @@ For best results:
 
 ## What this tutorial does not demonstrate
 
-The current build does not yet answer prose questions, summarize the pack,
-ingest webpages, extract PDF or Office documents, create dossiers, or run a
-local language model. Those are later milestones. Completing this tutorial
+The current build does not yet ingest images, answer prose questions, summarize
+the pack, ingest webpages, extract PDF or Office documents, create dossiers, or
+run a local language model. Image support is planned next; PDF and Office are
+deliberately later milestones. Completing this tutorial
 confirms that encrypted local retention, version watching, lexical retrieval,
 and exact citation reopening are working.

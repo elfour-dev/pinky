@@ -7,9 +7,10 @@ runtime. Its first objective is narrow but useful: ask a question about approved
 local text sources and receive a local answer whose citations reopen the exact
 retained passages.
 
-Model downloads, supervised `llama-server`, embeddings, Qdrant, PDF extraction,
-and web research are not prerequisites for the first usable release. A checked
-item does not complete a phase until every gate for that phase passes.
+Model downloads, supervised `llama-server`, embeddings, Qdrant, document
+extraction, and web research are not prerequisites for the first usable
+release. A checked item does not complete a phase until every gate for that
+phase passes.
 
 ## Delivery checkpoints
 
@@ -346,19 +347,48 @@ gates remain.
 - [x] Add normal desktop onboarding, persistent encrypted configuration, and
   idle-managed sidecar shutdown.
 - [x] Add a strict signed artifact manifest verifier with HTTPS, metadata,
-  Ed25519, size, digest, and atomic-install checks.
-- Add reranking, relevance fixtures, and warm p95 performance acceptance.
+  Ed25519, size, digest, redirect rejection, streamed download, and
+  atomic-install checks.
+- [x] Add a bounded deterministic reranker over the best 30 fused candidates,
+  cap results at 12 citations, and cover relevance/bounding behavior with
+  fixtures.
+- [x] Add a warm reranker p95 smoke test; the target-host one-million-chunk
+  retrieval benchmark remains a release acceptance gate.
+- [ ] Install and verify signed embedding/Qdrant artifacts on the target host,
+  run the retained-chunk backfill, and record warm p95 retrieval below 500 ms.
+
+## R8 — prioritised image support
+
+Status: planned as the next product phase after R7. PDF and Office extraction
+are explicitly deferred until this phase and its acceptance gates pass.
+
+Contract: approved image files remain encrypted, versioned, cancellable, and
+inspectable without leaking pixels, OCR text, or metadata outside the mounted
+vault.
+
+Planned scope:
+
+- image metadata ingestion for PNG, JPEG, WebP, GIF, and TIFF;
+- bounded OCR in an isolated worker, with the original image retained;
+- exact retained-image viewing and source/version metadata;
+- cancellation of metadata/OCR work, quarantined partial extraction, and exact
+  reopening of retained image artifacts.
+
+R8 gates will cover vault-only pixel and OCR retention, deterministic image
+metadata, isolated-worker limits, cancellation, and clean restart recovery.
 
 ## Parallel and deferred tracks
 
 These do not delay R2-R6 unless the user changes priority:
 
 - Supervised llama.cpp launch and model download onboarding
-- PDF, Office, image metadata, and OCR extraction
+- PDF and Office extraction (deferred until after R8 image support)
+- Image generation (deferred until a later creative-tools phase)
 - Public-web research and freshness scheduling
 - Claims, contradictions, and dossiers beyond answer warnings
 - Autonomous workspace tools and generated applications
-- Image generation, backup/restore, and full release acceptance
+- Backup/restore, packaging, upgrades, accessibility acceptance, and full
+  release acceptance
 
 ## Execution rule
 

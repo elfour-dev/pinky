@@ -108,12 +108,20 @@ supervised Qdrant sidecar per application session, and reports retrieval
 phases when the three documented environment values are set. The runtime panel
 now verifies and stores the hybrid settings inside the encrypted vault and
 stops the sidecar after five idle minutes. The signed artifact manifest
-verifier now covers strict metadata, Ed25519 signatures, checksums, and atomic
-installation. Use `docs/PRIVACY_INSPECTION.md` for the scanner command and run
+verifier now covers strict metadata, Ed25519 signatures, checksums, streamed
+downloads with redirects rejected, and atomic installation. The core reranker
+now bounds hybrid selection to 30 fused candidates and 12 returned citations.
+Use `docs/PRIVACY_INSPECTION.md` for the scanner command and run
 the ignored live test with `PINKY_OLLAMA_ENDPOINT` and
-`PINKY_OLLAMA_MODEL` set. The next slice is desktop artifact onboarding, a
-live backfill acceptance, reranking, and warm retrieval performance
-measurement.
+`PINKY_OLLAMA_MODEL` set. The remaining R7 release gate is target-host
+onboarding/backfill with a verified Qdrant executable and embedding model,
+followed by the one-million-chunk warm p95 measurement.
+
+Product priority change: after R7 acceptance, implement R8 image support
+(metadata, OCR, retained-image viewing, and artifact handling). Image
+generation is deferred to a later creative-tools phase. PDF and Office
+extraction are deferred until after R8; do not start those extractors as the
+next slice.
 
 ## Orientation commands
 

@@ -53,10 +53,11 @@ text-ingestion and lexical-search slices are usable from the Sources panel and
 composer. When a local Ollama model is attached, **Ask** mode retrieves retained
 passages and produces validated, cited answers; **Search** mode remains an
 explicit lexical lookup. Hybrid vector retrieval is available as an opt-in
-development path; additional extractors, automatic research, generated-code
-containers, image generation, backup/restore, and the later release gates
-remain unimplemented. Retained-data operations remain disabled while the vault
-is unavailable.
+development path. Image ingestion and OCR are the next prioritised product
+phase; PDF and Office extraction are deliberately deferred until after it.
+Image generation, automatic research, generated-code containers, backup/restore,
+and the later release gates remain unimplemented. Retained-data operations
+remain disabled while the vault is unavailable.
 
 Core also contains the next retrieval foundation: a supervised, authenticated,
 loopback-only Qdrant client and the specified reciprocal-rank fusion algorithm.

@@ -19,6 +19,7 @@ pub mod process;
 pub mod qa;
 pub mod qdrant;
 pub mod recovery;
+pub mod reranking;
 pub mod retrieval;
 pub mod task;
 pub mod task_journal;
@@ -71,6 +72,7 @@ pub use qdrant::{
     QdrantClient, QdrantError, QdrantLaunchConfig, QdrantSidecar, VectorMatch, VectorPoint,
 };
 pub use recovery::{RecoveryEnvelope, RecoveryError, VaultKey, VaultSubkeys};
+pub use reranking::{rerank_hits, MAX_RERANK_CANDIDATES, MAX_RERANK_RESULTS};
 pub use retrieval::{
     CitationPassage, HybridRetrievalError, IndexedChunk, RetrievalError, RetrievalService,
     SearchHit, HYBRID_CANDIDATE_LIMIT,

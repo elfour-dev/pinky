@@ -198,7 +198,9 @@ to silence the error.
 
 Currently extractable formats are UTF-8 text, Markdown, logs, source code, JSON,
 YAML, XML, HTML, and CSV. Other files are retained safely but marked
-`unsupported`; PDF, Office, image OCR, and web ingestion are planned work.
+`unsupported`; image metadata/OCR is the next planned ingestion phase. PDF and
+Office extraction are intentionally deferred until after image support, while
+web ingestion remains a later phase.
 
 Pinky watches successfully ingested local files. After a file becomes stable,
 an edit creates a new retained and searchable version. If replacement indexing

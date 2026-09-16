@@ -26,7 +26,8 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Approved-path local UTF-8 text ingestion, encrypted retention, versioning, and chunk metadata
 - [x] Cross-source object deduplication and symlink-escape rejection
 - [x] Stable-change local-file watching, automatic re-versioning, and missing-file state
-- [ ] PDF, office, image/OCR, and isolated-worker extractors
+- [ ] Image metadata, OCR, and isolated image extraction workers (prioritised R8)
+- [ ] PDF and Office extractors (deferred until after R8)
 - [x] Encrypted Tantivy lexical index and exact retained-version citation viewer
 - [x] Authenticated loopback Qdrant supervision/client and reciprocal-rank fusion contract
 - [x] Strict token-bearing loopback llama-server health client contract
@@ -38,18 +39,23 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Opt-in embedding model integration, end-to-end Qdrant vector indexing,
   and citation-preserving hybrid retrieval
 - [x] Signed artifact manifest verification and atomic, checksum-verified
-  installation contract
+  installation contract, including bounded streamed downloads with redirects
+  rejected
+- [x] Bounded hybrid reranking over at most 30 fused candidates, returning at
+  most 12 citations with deterministic relevance fixtures
 - [x] One-shot cited Q&A over retained lexical evidence with explicit Ask/Search
   modes, cancellable task events, validated claims, warnings, gaps, and exact
   citation reopening
-- [ ] Signed model/Qdrant artifact onboarding, default hybrid cited chat, claims,
-  and dossiers
+- [ ] Signed model/Qdrant artifact onboarding, target-host retained-chunk
+  backfill, default hybrid cited chat, claims, dossiers, and the one-million
+  chunk warm p95 retrieval gate
 - [x] Encrypted persistent conversations with immutable ordered messages,
   bounded history, validated-answer persistence, and create/select/rename/delete
   desktop interactions
 - [ ] Safe web fetch, SearXNG, Chromium, research, and refresh scheduling
 - [ ] Workspace snapshots, permissions, Podman tools, and app generation
-- [ ] Image generation, accessibility acceptance, backup, packaging, upgrades
+- [ ] Image generation (deferred creative-tools phase)
+- [ ] Accessibility acceptance, backup, packaging, and upgrades
 - [x] Pinky Lite reliability path: interrupted-task recovery, bounded retry for
   recoverable model transport failures, reconnect guidance, and validated
   cancellation/error handling

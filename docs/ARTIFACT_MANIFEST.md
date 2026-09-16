@@ -36,8 +36,9 @@ The signature covers a domain-separated `pinky-artifact-manifest-v1` prefix
 followed by the canonical JSON encoding of `manifest`. The verifier never
 trusts a URL, model name, or executable path supplied by the model runtime.
 
-Installation copies a source download into a uniquely named temporary file in
-the destination directory, verifies that temporary file, flushes it, and then
+Installation streams the exact HTTPS manifest URL without following redirects
+into a uniquely named temporary file in the destination directory, enforces
+the declared byte limit, verifies that temporary file, flushes it, and then
 renames it atomically. Invalid or incomplete downloads are removed, and an
 existing destination is never overwritten. The implementation is in
 `crates/pinky-core/src/artifact.rs`; desktop artifact selection and signed

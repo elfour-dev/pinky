@@ -39,8 +39,10 @@ one specification:
 5. Add the offline development harness after useful cited Q&A works.
 
 This avoids making vector retrieval, public-web research, image generation,
-office extraction, and autonomous application generation prerequisites for the
-first useful assistant workflow.
+document extraction, and autonomous application generation prerequisites for
+the first useful assistant workflow. Once Pinky Lite is accepted, image
+ingestion and OCR are intentionally prioritised; image generation and PDF or
+Office extraction follow later.
 
 ## Offline development loop
 

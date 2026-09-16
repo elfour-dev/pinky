@@ -167,7 +167,11 @@ pub struct VectorMatch {
 }
 
 impl QdrantClient {
-    fn loopback(port: u16, api_key: Zeroizing<String>) -> Result<Self, QdrantError> {
+    /// Connect to a supervised Qdrant instance bound to IPv4 loopback.
+    ///
+    /// This intentionally rejects arbitrary endpoints by construction: callers
+    /// provide only a port and a launch-scoped bearer token.
+    pub fn loopback(port: u16, api_key: Zeroizing<String>) -> Result<Self, QdrantError> {
         Ok(Self {
             client: Client::builder()
                 .no_proxy()

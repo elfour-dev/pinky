@@ -20,6 +20,7 @@ use crate::{
     embedding::{EmbeddingError, EmbeddingProvider},
     hybrid::{reciprocal_rank_fusion, RankedChunk},
     qdrant::{QdrantClient, QdrantError, VectorMatch},
+    reranking::{rerank_hits, MAX_RERANK_CANDIDATES},
     Database, ObjectStore, ObjectStoreError, VaultError,
 };
 
@@ -249,6 +250,16 @@ impl RetrievalService {
         vector: &[VectorMatch],
         limit: usize,
     ) -> Result<Vec<SearchHit>, RetrievalError> {
+        self.merge_hybrid_hits_for_query("", lexical, vector, limit)
+    }
+
+    pub fn merge_hybrid_hits_for_query(
+        &self,
+        query: &str,
+        lexical: &[SearchHit],
+        vector: &[VectorMatch],
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, RetrievalError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -281,17 +292,16 @@ impl RetrievalService {
                 hits_by_id.insert(candidate.id, hit);
             }
         }
-        Ok(
-            reciprocal_rank_fusion(&lexical_ranked, &vector_ranked, limit)
-                .into_iter()
-                .filter_map(|candidate| {
-                    hits_by_id.remove(&candidate.chunk_id).map(|mut hit| {
-                        hit.score = candidate.fused_score;
-                        hit
-                    })
+        let fused = reciprocal_rank_fusion(&lexical_ranked, &vector_ranked, MAX_RERANK_CANDIDATES)
+            .into_iter()
+            .filter_map(|candidate| {
+                hits_by_id.remove(&candidate.chunk_id).map(|mut hit| {
+                    hit.score = candidate.fused_score;
+                    hit
                 })
-                .collect(),
-        )
+            })
+            .collect::<Vec<_>>();
+        Ok(rerank_hits(query, &fused, limit))
     }
 
     pub async fn search_hybrid<P: EmbeddingProvider + ?Sized>(
@@ -327,7 +337,7 @@ impl RetrievalService {
         if cancellation.is_cancelled() {
             return Err(HybridRetrievalError::Cancelled);
         }
-        Ok(self.merge_hybrid_hits(&lexical, &vector, limit)?)
+        Ok(self.merge_hybrid_hits_for_query(query, &lexical, &vector, limit)?)
     }
 
     pub fn open_citation(&self, uri: &str) -> Result<CitationPassage, RetrievalError> {
@@ -785,5 +795,43 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].citation_uri, citation_uri);
         assert!(merged[0].score > 0.0);
+    }
+
+    #[test]
+    #[ignore = "target-host acceptance: builds one million chunks and measures warm lexical p95"]
+    fn one_million_chunk_warm_lexical_p95_stays_below_half_second() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(root.path(), Mounted).unwrap();
+        let objects = ObjectStore::new(vault);
+        let lexical = LexicalIndex::open(&objects).unwrap();
+        let source = Uuid::new_v4();
+        let version = Uuid::new_v4();
+        let chunks = (0..1_000_000_u64)
+            .map(|ordinal| IndexedChunk {
+                chunk_id: Uuid::new_v4(),
+                source_id: source,
+                version_id: version,
+                ordinal,
+                display_name: format!("source-{ordinal}.md"),
+                heading: Some("retrieval benchmark".into()),
+                body: format!(
+                    "Retained benchmark passage {ordinal} contains a stable searchable token."
+                ),
+            })
+            .collect::<Vec<_>>();
+        lexical.rebuild(&chunks).unwrap();
+        let mut timings = Vec::with_capacity(100);
+        for _ in 0..100 {
+            let started = std::time::Instant::now();
+            let results = lexical.search("stable searchable token", 50).unwrap();
+            assert_eq!(results.len(), 50);
+            timings.push(started.elapsed());
+        }
+        timings.sort_unstable();
+        let p95 = timings[timings.len() * 95 / 100];
+        assert!(
+            p95 < std::time::Duration::from_millis(500),
+            "warm lexical p95 was {p95:?}"
+        );
     }
 }
