@@ -202,9 +202,10 @@ For best results:
 
 ## What this tutorial does not demonstrate
 
-The current build does not yet ingest images, answer prose questions, summarize
-the pack, ingest webpages, extract PDF or Office documents, create dossiers, or
-run a local language model. Image support is planned next; PDF and Office are
-deliberately later milestones. Completing this tutorial
+The current build now archives PNG, JPEG, WebP, GIF, and TIFF files, makes
+their technical metadata searchable, can attach bounded local OCR text, and
+can open retained pixels from image citations. It does not yet summarize the pack, ingest webpages,
+extract PDF or Office documents, create dossiers, or run a local language
+model. PDF and Office are deliberately later milestones. Completing this tutorial
 confirms that encrypted local retention, version watching, lexical retrieval,
 and exact citation reopening are working.

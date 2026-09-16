@@ -40,9 +40,10 @@ one specification:
 
 This avoids making vector retrieval, public-web research, image generation,
 document extraction, and autonomous application generation prerequisites for
-the first useful assistant workflow. Once Pinky Lite is accepted, image
-ingestion and OCR are intentionally prioritised; image generation and PDF or
-Office extraction follow later.
+the first useful assistant workflow. Image metadata, bounded local OCR,
+retained-pixel viewing, and image cancellation/restart acceptance are now
+available. Image generation remains separate follow-up work. PDF or Office
+extraction follows the prioritised image phase.
 
 ## Offline development loop
 

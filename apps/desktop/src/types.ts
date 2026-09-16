@@ -55,6 +55,14 @@ export interface CitationPassage extends Omit<SearchHit, "score"> {
   canonical_uri: string;
   mime_type: string;
 }
+export interface RetainedImage {
+  source_id: string;
+  version_id: string;
+  display_name: string;
+  mime_type: string;
+  byte_size: number;
+  bytes_base64: string;
+}
 export type ClaimSupport = "direct" | "inference" | "disputed";
 export interface AnswerClaim {
   statement: string;

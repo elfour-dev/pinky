@@ -117,9 +117,14 @@ the ignored live test with `PINKY_OLLAMA_ENDPOINT` and
 onboarding/backfill with a verified Qdrant executable and embedding model,
 followed by the one-million-chunk warm p95 measurement.
 
-Product priority change: after R7 acceptance, implement R8 image support
-(metadata, OCR, retained-image viewing, and artifact handling). Image
-generation is deferred to a later creative-tools phase. PDF and Office
+Product priority change: R8 image metadata ingestion is implemented for PNG,
+JPEG, WebP, GIF, and TIFF. A bounded supervised OCR worker now keeps its
+materialized input and output inside the mounted vault, attaches normalized OCR
+chunks to the current source version, and cleans up on completion or
+cancellation. Image citations can explicitly load the exact retained pixels.
+Deterministic cancellation and vault-reopen acceptance fixtures now pass, so R8
+is complete for this retained-image scope.
+Image generation is deferred to a later creative-tools phase. PDF and Office
 extraction are deferred until after R8; do not start those extractors as the
 next slice.
 

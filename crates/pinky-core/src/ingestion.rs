@@ -15,11 +15,13 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    Database, IndexedChunk, ObjectStore, ObjectStoreError, RetrievalError, RetrievalService,
-    StoredObject,
+    extract_image_metadata, Database, ImageOcrError, ImageOcrWorker, IndexedChunk, ObjectStore,
+    ObjectStoreError, RetrievalError, RetrievalService, StoredObject, MAX_IMAGE_METADATA_BYTES,
+    MAX_OCR_TEXT_BYTES,
 };
 
 const EXTRACTION_VERSION: &str = "pinky-text-v1";
+const IMAGE_EXTRACTION_VERSION: &str = "pinky-image-metadata-v1";
 const TARGET_TOKENS: usize = 500;
 const OVERLAP_TOKENS: usize = 75;
 const MAX_TEXT_BYTES: u64 = 64 * 1024 * 1024;
@@ -48,6 +50,14 @@ pub enum IngestionError {
     Serialization(#[from] serde_json::Error),
     #[error("ingestion retrieval index error: {0}")]
     Retrieval(#[from] RetrievalError),
+    #[error("image OCR failed: {0}")]
+    Ocr(#[from] ImageOcrError),
+    #[error("the requested image version is no longer current")]
+    StaleImageVersion,
+    #[error("OCR returned no text")]
+    EmptyOcrOutput,
+    #[error("OCR has already been attached to this image version")]
+    OcrAlreadyAttached,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,6 +191,26 @@ impl LocalIngestor {
             String::from_utf8(bytes)
                 .ok()
                 .map(|text| normalize_text(&text))
+        } else if is_supported_image(&mime_type) && byte_size <= MAX_IMAGE_METADATA_BYTES as u64 {
+            let bytes = self.objects.read_verified(&original.metadata.sha256)?;
+            extract_image_metadata(&mime_type, &bytes)
+                .ok()
+                .and_then(|metadata| metadata.to_retained_json().ok())
+        } else {
+            None
+        };
+        let image_metadata_error = if is_supported_image(&mime_type)
+            && byte_size <= MAX_IMAGE_METADATA_BYTES as u64
+            && extraction.is_none()
+        {
+            let bytes = self.objects.read_verified(&original.metadata.sha256)?;
+            extract_image_metadata(&mime_type, &bytes)
+                .err()
+                .map(|error| error.to_string())
+        } else if is_supported_image(&mime_type) && byte_size > MAX_IMAGE_METADATA_BYTES as u64 {
+            Some(format!(
+                "image metadata limit exceeded ({byte_size} bytes; maximum {MAX_IMAGE_METADATA_BYTES})"
+            ))
         } else {
             None
         };
@@ -200,13 +230,20 @@ impl LocalIngestor {
             Some(format!(
                 "text extraction limit exceeded ({byte_size} bytes; maximum {MAX_TEXT_BYTES})"
             ))
+        } else if let Some(error) = image_metadata_error {
+            Some(error)
         } else {
             Some("format is archived but not yet extractable".to_owned())
         };
 
+        let extracted_mime = if is_supported_image(&mime_type) {
+            "application/json"
+        } else {
+            "text/plain"
+        };
         let extracted = extraction
             .as_ref()
-            .map(|text| self.objects.put(text.as_bytes(), "text/plain"))
+            .map(|text| self.objects.put(text.as_bytes(), extracted_mime))
             .transpose()?;
         let mut chunks = Vec::new();
         if let Some(text) = extraction.as_deref() {
@@ -284,8 +321,20 @@ impl LocalIngestor {
                     .map(|object| object.metadata.sha256.as_str()),
                 mime_type,
                 byte_size,
-                extraction.as_ref().map(|_| "builtin_text"),
-                extraction.as_ref().map(|_| EXTRACTION_VERSION),
+                extraction.as_ref().map(|_| {
+                    if is_supported_image(&mime_type) {
+                        "builtin_image_metadata"
+                    } else {
+                        "builtin_text"
+                    }
+                }),
+                extraction.as_ref().map(|_| {
+                    if is_supported_image(&mime_type) {
+                        IMAGE_EXTRACTION_VERSION
+                    } else {
+                        EXTRACTION_VERSION
+                    }
+                }),
                 now,
                 serde_json::to_string(&fingerprint)?,
                 previous_version,
@@ -388,6 +437,190 @@ impl LocalIngestor {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Run the supervised OCR worker for the current retained image version and
+    /// attach its bounded text as additional searchable chunks. The original
+    /// image and metadata remain unchanged; a stale version cannot be mutated.
+    pub async fn ocr_current_image(
+        &self,
+        source_id: Uuid,
+        version_id: Uuid,
+        worker: &ImageOcrWorker,
+        cancellation: &CancellationToken,
+    ) -> Result<usize, IngestionError> {
+        check_cancelled(cancellation)?;
+        let (current_version, original_hash, mime_type, extracted_hash, extraction_method) = {
+            let database = self
+                .database
+                .lock()
+                .map_err(|_| IngestionError::DatabaseLock)?;
+            database
+                .connection()
+                .query_row(
+                    "SELECT s.current_version_id, v.original_object_hash, v.mime_type,
+                            v.extracted_object_hash, v.extraction_method
+                     FROM sources s
+                     JOIN source_versions v ON v.id = s.current_version_id
+                     WHERE s.id = ?1 AND s.state NOT IN ('deleted', 'missing')",
+                    [source_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or(IngestionError::StaleImageVersion)?
+        };
+        if current_version.as_deref() != Some(&version_id.to_string()) {
+            return Err(IngestionError::StaleImageVersion);
+        }
+        if !is_supported_image(&mime_type) {
+            return Err(IngestionError::Ocr(ImageOcrError::UnsupportedMime));
+        }
+        if extraction_method
+            .as_deref()
+            .is_some_and(|method| method.contains("+ocr"))
+        {
+            return Err(IngestionError::OcrAlreadyAttached);
+        }
+        let text = worker
+            .recognize(&self.objects, &original_hash, &mime_type, cancellation)
+            .await?;
+        check_cancelled(cancellation)?;
+        let text = normalize_text(&text);
+        if text.trim().is_empty() {
+            return Err(IngestionError::EmptyOcrOutput);
+        }
+        if text.len() > MAX_OCR_TEXT_BYTES {
+            return Err(IngestionError::Ocr(ImageOcrError::OutputTooLarge));
+        }
+
+        let metadata = extracted_hash
+            .as_deref()
+            .map(|hash| self.objects.read_verified(hash))
+            .transpose()?;
+        let mut retained = metadata
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        retained["ocr_text"] = serde_json::Value::String(text.clone());
+        retained["ocr_version"] = serde_json::Value::String("pinky-ocr-v1".to_owned());
+        let extracted = self.objects.put(
+            serde_json::to_string_pretty(&retained)?.as_bytes(),
+            "application/json",
+        )?;
+        let mut chunks = Vec::new();
+        for chunk in chunk_text(&text) {
+            check_cancelled(cancellation)?;
+            let stored = self.objects.put(chunk.text.as_bytes(), "text/plain")?;
+            chunks.push((chunk, stored));
+        }
+        if chunks.is_empty() {
+            return Err(IngestionError::EmptyOcrOutput);
+        }
+
+        check_cancelled(cancellation)?;
+        let now = Utc::now().to_rfc3339();
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| IngestionError::DatabaseLock)?;
+        let transaction = database.connection().unchecked_transaction()?;
+        let current: Option<(String, Option<String>, Option<String>)> = transaction
+            .query_row(
+                "SELECT s.current_version_id, v.extracted_object_hash, v.extraction_method
+                 FROM sources s JOIN source_versions v ON v.id = s.current_version_id
+                 WHERE s.id = ?1 AND s.state NOT IN ('deleted', 'missing')",
+                [source_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((current_id, previous_extracted, current_method)) = current else {
+            return Err(IngestionError::StaleImageVersion);
+        };
+        if current_id != version_id.to_string() {
+            return Err(IngestionError::StaleImageVersion);
+        }
+        if current_method
+            .as_deref()
+            .is_some_and(|method| method.contains("+ocr"))
+        {
+            return Err(IngestionError::OcrAlreadyAttached);
+        }
+        record_object(&transaction, &extracted, 1)?;
+        for (_, stored) in &chunks {
+            check_cancelled(cancellation)?;
+            record_object(&transaction, stored, 1)?;
+        }
+        if let Some(previous) = previous_extracted {
+            transaction.execute(
+                "UPDATE objects SET reference_count = reference_count - 1
+                 WHERE sha256 = ?1 AND reference_count > 0",
+                [previous],
+            )?;
+        }
+        let ordinal_start: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM chunks WHERE source_version_id = ?1",
+            [version_id.to_string()],
+            |row| row.get(0),
+        )?;
+        for (offset, (chunk, stored)) in chunks.iter().enumerate() {
+            let chunk_id = Uuid::new_v4();
+            transaction.execute(
+                "INSERT INTO chunks (
+                    id, source_version_id, ordinal, heading_path, character_start,
+                    character_end, byte_start, byte_end, coordinates_json, token_count,
+                    extracted_text_hash, embedding_id
+                 ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+                params![
+                    chunk_id.to_string(),
+                    version_id.to_string(),
+                    ordinal_start + offset as i64,
+                    chunk.character_start as i64,
+                    chunk.character_end as i64,
+                    chunk.byte_start as i64,
+                    chunk.byte_end as i64,
+                    serde_json::json!({
+                        "ocr": true,
+                        "line_start": chunk.line_start,
+                        "line_end": chunk.line_end,
+                    })
+                    .to_string(),
+                    chunk.token_count as i64,
+                    stored.metadata.sha256,
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE source_versions
+             SET extracted_object_hash = ?1, extraction_method = 'builtin_image_metadata+ocr',
+                 extraction_version = 'pinky-image-metadata-v1+ocr-v1', processing_state = 'ready',
+                 error = NULL, retrieved_at = ?2
+             WHERE id = ?3",
+            params![extracted.metadata.sha256, now, version_id.to_string()],
+        )?;
+        transaction.execute(
+            "UPDATE sources SET updated_at = ?1, last_checked_at = ?1 WHERE id = ?2",
+            params![now, source_id.to_string()],
+        )?;
+        check_cancelled(cancellation)?;
+        transaction.commit()?;
+        drop(database);
+
+        let indexed = RetrievalService::new(self.database.clone(), self.objects.clone())
+            .current_chunks()?
+            .into_iter()
+            .filter(|chunk| chunk.version_id == version_id)
+            .collect::<Vec<_>>();
+        RetrievalService::new(self.database.clone(), self.objects.clone())
+            .index_version(version_id, &indexed)?;
+        Ok(chunks.len())
     }
 
     pub fn watch_targets(&self) -> Result<Vec<LocalWatchTarget>, IngestionError> {
@@ -552,6 +785,10 @@ fn detect_mime(path: &Path, prefix: &[u8]) -> String {
         Some("image/jpeg")
     } else if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
         Some("image/gif")
+    } else if prefix.starts_with(b"RIFF") && prefix.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else if prefix.starts_with(b"II*\0") || prefix.starts_with(b"MM\0*") {
+        Some("image/tiff")
     } else if prefix.starts_with(b"PK\x03\x04") {
         Some("application/zip")
     } else {
@@ -589,6 +826,13 @@ fn is_supported_text(mime_type: &str) -> bool {
             mime_type,
             "application/json" | "application/yaml" | "application/xml"
         )
+}
+
+fn is_supported_image(mime_type: &str) -> bool {
+    matches!(
+        mime_type,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff"
+    )
 }
 
 fn normalize_text(text: &str) -> String {
@@ -668,9 +912,10 @@ fn chunk_text(text: &str) -> Vec<TextChunk> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MountVerifier, Vault};
+    use crate::{ImageOcrWorker, MountVerifier, Vault};
     use std::fs::File;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
 
     struct Mounted;
     impl MountVerifier for Mounted {
@@ -738,6 +983,87 @@ mod tests {
         assert_eq!(ingested.state, "unsupported");
         assert_eq!(ingested.chunk_count, 0);
         assert_eq!(ingestor.list_sources().unwrap()[0].state, "unsupported");
+    }
+
+    #[test]
+    fn retains_image_metadata_as_encrypted_searchable_extraction() {
+        let (_vault, approved, ingestor) = ingestor();
+        let source = approved.path().join("diagram.png");
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        bytes.extend_from_slice(&[0, 0, 4, 0, 0, 0, 3, 0, 8, 6, 0, 0, 0, 0]);
+        fs::write(&source, bytes).unwrap();
+
+        let ingested = ingestor.ingest(approved.path(), &source).unwrap();
+        assert_eq!(ingested.mime_type, "image/png");
+        assert_eq!(ingested.state, "active");
+        assert_eq!(ingested.chunk_count, 1);
+
+        let database = ingestor.database.lock().unwrap();
+        let extracted_hash: String = database
+            .connection()
+            .query_row(
+                "SELECT extracted_object_hash FROM source_versions WHERE id = ?1",
+                [ingested.version_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(database);
+        let retained =
+            String::from_utf8(ingestor.objects.read_verified(&extracted_hash).unwrap()).unwrap();
+        assert!(retained.contains("\"format\": \"PNG\""));
+        assert!(retained.contains("\"width\": 1024"));
+        assert!(retained.contains("\"height\": 768"));
+        assert_eq!(ingestor.list_sources().unwrap()[0].state, "active");
+        let retrieval = RetrievalService::new(ingestor.database.clone(), ingestor.objects.clone());
+        let hits = retrieval.search("1024", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].passage.contains("\"format\": \"PNG\""));
+    }
+
+    #[tokio::test]
+    async fn attaches_bounded_ocr_as_searchable_current_version_chunks() {
+        let (vault_root, approved, ingestor) = ingestor();
+        let source = approved.path().join("scan.png");
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        bytes.extend_from_slice(&[0, 0, 2, 0, 0, 0, 2, 0, 8, 6, 0, 0, 0, 0]);
+        fs::write(&source, bytes).unwrap();
+        let retained = ingestor.ingest(approved.path(), &source).unwrap();
+
+        let executable = vault_root.path().join("fake-ocr.sh");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'invoice total 42\\n' > \"$2.txt\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let worker = ImageOcrWorker::new(&executable, "eng").unwrap();
+        let chunks = ingestor
+            .ocr_current_image(
+                retained.source_id,
+                retained.version_id,
+                &worker,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(chunks, 1);
+
+        let retrieval = RetrievalService::new(ingestor.database.clone(), ingestor.objects.clone());
+        let hits = retrieval.search("invoice", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].coordinates["ocr"].as_bool(), Some(true));
+        assert!(hits[0]
+            .citation_uri
+            .contains(&retained.version_id.to_string()));
+        let duplicate = ingestor
+            .ocr_current_image(
+                retained.source_id,
+                retained.version_id,
+                &worker,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(duplicate, Err(IngestionError::OcrAlreadyAttached)));
     }
 
     #[test]

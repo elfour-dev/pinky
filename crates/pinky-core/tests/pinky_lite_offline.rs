@@ -9,9 +9,9 @@ use std::{
 
 use pinky_core::{
     answer_question, AnswerClaimV1, AnswerEnvelopeV1, ClaimSupportV1, ConversationService,
-    Database, InferenceFuture, InferenceMetrics, InferenceProvider, InferenceResponse,
-    LocalIngestor, MessageDraft, MountVerifier, ObjectStore, QuestionRequestV1, RetrievalService,
-    StructuredGenerationRequest, Vault, QA_SCHEMA_VERSION,
+    Database, ImageOcrWorker, InferenceFuture, InferenceMetrics, InferenceProvider,
+    InferenceResponse, LocalIngestor, MessageDraft, MountVerifier, ObjectStore, QuestionRequestV1,
+    RetrievalService, StructuredGenerationRequest, Vault, QA_SCHEMA_VERSION,
 };
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -218,4 +218,69 @@ async fn offline_cited_qa_round_trip_is_restart_safe() {
     assert_eq!(restored.messages.len(), 2);
     assert_eq!(restored.messages[1].content, answer.summary);
     assert_eq!(restored.messages[1].citations, answer.summary_citations);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn image_ocr_attachment_survives_vault_reopen_and_remains_citable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let vault_root = tempfile::tempdir().unwrap();
+    let vault = Vault::open_with(vault_root.path(), Mounted).unwrap();
+    let database = Arc::new(Mutex::new(
+        Database::open(&vault, Zeroizing::new(vec![0x5a; 32])).unwrap(),
+    ));
+    let objects = ObjectStore::new(vault.clone());
+    let approved_root = tempfile::tempdir().unwrap();
+    let image = approved_root.path().join("restart.png");
+    let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    bytes.extend_from_slice(&[0, 0, 1, 0, 0, 0, 1, 0, 8, 6, 0, 0, 0, 0]);
+    fs::write(&image, bytes).unwrap();
+
+    let ingestor = LocalIngestor::new(database.clone(), objects.clone());
+    let retained = ingestor.ingest(approved_root.path(), &image).unwrap();
+    let executable = vault_root.path().join("fake-ocr.sh");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf 'restart safe OCR text\\n' > \"$2.txt\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let worker = ImageOcrWorker::new(&executable, "eng").unwrap();
+    ingestor
+        .ocr_current_image(
+            retained.source_id,
+            retained.version_id,
+            &worker,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let retrieval = RetrievalService::new(database.clone(), objects.clone());
+    let before_restart = retrieval.search("restart", 5).unwrap();
+    let before_ocr = before_restart
+        .iter()
+        .find(|hit| hit.coordinates["ocr"].as_bool().unwrap_or(false))
+        .expect("OCR chunk must be searchable before restart");
+    assert_eq!(before_ocr.version_id, retained.version_id);
+
+    drop(retrieval);
+    drop(ingestor);
+    drop(database);
+    drop(objects);
+
+    let restarted_vault = Vault::open_with(vault_root.path(), Mounted).unwrap();
+    let restarted_database = Arc::new(Mutex::new(
+        Database::open(&restarted_vault, Zeroizing::new(vec![0x5a; 32])).unwrap(),
+    ));
+    let restarted_objects = ObjectStore::new(restarted_vault);
+    let restarted = RetrievalService::new(restarted_database, restarted_objects);
+    let after_restart = restarted.search("restart", 5).unwrap();
+    let after_ocr = after_restart
+        .iter()
+        .find(|hit| hit.coordinates["ocr"].as_bool().unwrap_or(false))
+        .expect("OCR chunk must remain searchable after restart");
+    assert_eq!(after_ocr.version_id, retained.version_id);
+    let citation = restarted.open_citation(&after_ocr.citation_uri).unwrap();
+    assert_eq!(citation.passage, "restart safe OCR text");
 }

@@ -10,12 +10,12 @@ use pinky_core::{
     answer_question_with_history, create_registered_vault, read_registration,
     unlock_registered_vault, AnswerEnvelopeV1, CitationPassage, ClaimSupportV1, ConversationDetail,
     ConversationService, ConversationSummary, ConversationTurnV1, EmbeddingIndexer, GocryptfsMount,
-    HybridConfiguration, InferenceError, InferenceFuture, InferenceProvider, LlamaClient,
-    LlamaError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget, MessageDraft, ObjectStore,
-    OllamaClient, OllamaError, OllamaRuntimeInfo, OnboardedVault, QaError, QdrantLaunchConfig,
-    QdrantSidecar, RetrievalService, SearchHit, SourceSummary, StructuredGenerationRequest,
-    SystemVaultPlatform, TaskContext, TaskJournal, TaskManager, Vault, VaultPaths,
-    VaultRegistration,
+    HybridConfiguration, ImageOcrWorker, InferenceError, InferenceFuture, InferenceProvider,
+    LlamaClient, LlamaError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget, MessageDraft,
+    ObjectStore, OllamaClient, OllamaError, OllamaRuntimeInfo, OnboardedVault, QaError,
+    QdrantLaunchConfig, QdrantSidecar, RetainedImage, RetrievalService, SearchHit, SourceSummary,
+    StructuredGenerationRequest, SystemVaultPlatform, TaskContext, TaskJournal, TaskManager, Vault,
+    VaultPaths, VaultRegistration,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
@@ -149,6 +149,14 @@ struct SetupVaultRequest {
 struct IngestLocalFileRequest {
     approved_root: PathBuf,
     source_path: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct OcrImageRequest {
+    source_id: Uuid,
+    version_id: Uuid,
+    executable: PathBuf,
+    language: String,
 }
 
 #[derive(Deserialize)]
@@ -1435,6 +1443,52 @@ async fn ingest_local_file(
 }
 
 #[tauri::command]
+async fn ocr_image(
+    request: OcrImageRequest,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<String, String> {
+    let ingestor = local_ingestor(runtime.inner())?;
+    let worker = ImageOcrWorker::new(&request.executable, &request.language)
+        .map_err(|error| error.to_string())?;
+    let task_id = tasks.spawn("image OCR", None, move |mut context| async move {
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "image OCR",
+            Some(0.1),
+            "Running the supervised OCR worker inside the encrypted vault boundary",
+        );
+        let cancellation = context.cancellation_token();
+        let chunks = ingestor
+            .ocr_current_image(
+                request.source_id,
+                request.version_id,
+                &worker,
+                &cancellation,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "image OCR",
+            Some(0.95),
+            format!(
+                "Attached {chunks} OCR text chunk{}",
+                if chunks == 1 { "" } else { "s" }
+            ),
+        );
+        Ok(())
+    });
+    Ok(task_id.to_string())
+}
+
+#[tauri::command]
 fn list_sources(runtime: State<'_, AppRuntime>) -> Result<Vec<SourceSummary>, String> {
     local_ingestor(runtime.inner())?
         .list_sources()
@@ -1853,6 +1907,16 @@ fn open_citation(
 }
 
 #[tauri::command]
+fn open_retained_image(
+    citation_uri: String,
+    runtime: State<'_, AppRuntime>,
+) -> Result<RetainedImage, String> {
+    retrieval_service(runtime.inner())?
+        .open_retained_image(&citation_uri)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn cancel_task(task_id: String, tasks: State<'_, TaskManager>) -> Result<(), String> {
     let id = Uuid::parse_str(&task_id).map_err(|_| "invalid task UUID".to_owned())?;
     if tasks.cancel(id) {
@@ -1979,6 +2043,7 @@ pub fn run() {
             unlock_vault,
             start_system_check,
             ingest_local_file,
+            ocr_image,
             list_sources,
             get_hybrid_configuration,
             configure_hybrid_retrieval,
@@ -1991,6 +2056,7 @@ pub fn run() {
             delete_conversation,
             get_conversation,
             open_citation,
+            open_retained_image,
             cancel_task,
             pause_task,
             cancel_all_tasks,

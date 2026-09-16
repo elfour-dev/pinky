@@ -4,6 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tantivy::{
@@ -47,6 +48,10 @@ pub enum RetrievalError {
     CitationNotFound,
     #[error("retained chunk is not valid UTF-8")]
     InvalidChunkText,
+    #[error("retained image is too large to display safely")]
+    ImageTooLarge,
+    #[error("citation does not refer to a retained image")]
+    NotAnImage,
 }
 
 #[derive(Debug, Error)]
@@ -101,6 +106,16 @@ pub struct CitationPassage {
     pub heading: Option<String>,
     pub coordinates: serde_json::Value,
     pub retrieved_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RetainedImage {
+    pub source_id: Uuid,
+    pub version_id: Uuid,
+    pub display_name: String,
+    pub mime_type: String,
+    pub byte_size: usize,
+    pub bytes_base64: String,
 }
 
 #[derive(Clone)]
@@ -390,6 +405,57 @@ impl RetrievalService {
             heading: row.5,
             coordinates: parse_coordinates(row.6.as_deref()),
             retrieved_at: row.7,
+        })
+    }
+
+    /// Return the exact retained image bytes for a citation. This is an
+    /// explicit second request so opening a text/metadata citation never
+    /// eagerly copies image pixels through IPC.
+    pub fn open_retained_image(&self, uri: &str) -> Result<RetainedImage, RetrievalError> {
+        let (source_id, version_id, ordinal) = parse_citation_uri(uri)?;
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RetrievalError::DatabaseLock)?;
+        let row: Option<(String, String, String, i64)> = database
+            .connection()
+            .query_row(
+                "SELECT s.display_name, v.mime_type, v.original_object_hash, v.byte_size
+                 FROM source_versions v
+                 JOIN sources s ON s.id = v.source_id
+                 JOIN chunks c ON c.source_version_id = v.id
+                 WHERE s.id = ?1 AND v.id = ?2 AND c.ordinal = ?3 AND s.state != 'deleted'",
+                params![
+                    source_id.to_string(),
+                    version_id.to_string(),
+                    ordinal as i64
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((display_name, mime_type, hash, byte_size)) = row else {
+            return Err(RetrievalError::CitationNotFound);
+        };
+        if !matches!(
+            mime_type.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff"
+        ) {
+            return Err(RetrievalError::NotAnImage);
+        }
+        if byte_size < 0 || byte_size as usize > crate::MAX_IMAGE_METADATA_BYTES {
+            return Err(RetrievalError::ImageTooLarge);
+        }
+        let bytes = self.objects.read_verified(&hash)?;
+        if bytes.len() > crate::MAX_IMAGE_METADATA_BYTES {
+            return Err(RetrievalError::ImageTooLarge);
+        }
+        Ok(RetainedImage {
+            source_id,
+            version_id,
+            display_name,
+            mime_type,
+            byte_size: bytes.len(),
+            bytes_base64: STANDARD.encode(bytes),
         })
     }
 
@@ -755,6 +821,35 @@ mod tests {
             "Pinky stores exact retained passages about lunar geology."
         );
         assert_eq!(passage.version_id, hits[0].version_id);
+    }
+
+    #[test]
+    fn opens_exact_retained_image_bytes_for_an_image_citation() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(root.path(), Mounted).unwrap();
+        let database = Arc::new(Mutex::new(
+            Database::open(&vault, Zeroizing::new(vec![0x42; 32])).unwrap(),
+        ));
+        let objects = ObjectStore::new(vault);
+        let approved = tempfile::tempdir().unwrap();
+        let path = approved.path().join("diagram.png");
+        let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        bytes.extend_from_slice(&[0, 0, 1, 0, 0, 0, 1, 0, 8, 6, 0, 0, 0, 0]);
+        fs::write(&path, &bytes).unwrap();
+        let ingestor = crate::LocalIngestor::new(database.clone(), objects.clone());
+        let retained = ingestor.ingest(approved.path(), &path).unwrap();
+        let retrieval = RetrievalService::new(database, objects);
+        let citation = retrieval.search("PNG", 1).unwrap().remove(0).citation_uri;
+        let image = retrieval.open_retained_image(&citation).unwrap();
+        assert_eq!(image.version_id, retained.version_id);
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.byte_size, bytes.len());
+        assert_eq!(STANDARD.decode(image.bytes_base64).unwrap(), bytes);
+        let invalid = citation.replace("#chunk-0", "#chunk-99");
+        assert!(matches!(
+            retrieval.open_retained_image(&invalid),
+            Err(RetrievalError::CitationNotFound)
+        ));
     }
 
     #[test]

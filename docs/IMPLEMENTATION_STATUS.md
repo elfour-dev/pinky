@@ -26,7 +26,13 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Approved-path local UTF-8 text ingestion, encrypted retention, versioning, and chunk metadata
 - [x] Cross-source object deduplication and symlink-escape rejection
 - [x] Stable-change local-file watching, automatic re-versioning, and missing-file state
-- [ ] Image metadata, OCR, and isolated image extraction workers (prioritised R8)
+- [x] Image metadata ingestion for PNG, JPEG, WebP, GIF, and TIFF with
+  encrypted searchable metadata retention
+- [x] Bounded supervised OCR worker contract with vault-only staging and output
+  limits
+- [x] OCR result attachment and searchable OCR citations
+- [x] explicit retained-image viewing with source/version metadata
+- [x] image cancellation and restart acceptance gates
 - [ ] PDF and Office extractors (deferred until after R8)
 - [x] Encrypted Tantivy lexical index and exact retained-version citation viewer
 - [x] Authenticated loopback Qdrant supervision/client and reciprocal-rank fusion contract

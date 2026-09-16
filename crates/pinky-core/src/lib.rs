@@ -9,6 +9,7 @@ pub mod conversation;
 pub mod database;
 pub mod embedding;
 pub mod hybrid;
+pub mod image;
 pub mod inference;
 pub mod ingestion;
 pub mod llama;
@@ -42,6 +43,10 @@ pub use embedding::{
 pub use hybrid::{
     reciprocal_rank_fusion, FusedChunk, RankedChunk, MAX_CHUNKS_PER_SOURCE_VERSION, RRF_K,
 };
+pub use image::{
+    extract_image_metadata, ImageMetadata, ImageMetadataError, ImageOcrError, ImageOcrWorker,
+    IMAGE_METADATA_VERSION, MAX_IMAGE_METADATA_BYTES, MAX_OCR_TEXT_BYTES,
+};
 pub use inference::{
     InferenceError, InferenceFuture, InferenceMetrics, InferenceProvider, InferenceResponse,
     StructuredGenerationRequest, MAX_INFERENCE_REQUEST_BYTES, MAX_INFERENCE_RESPONSE_BYTES,
@@ -74,8 +79,8 @@ pub use qdrant::{
 pub use recovery::{RecoveryEnvelope, RecoveryError, VaultKey, VaultSubkeys};
 pub use reranking::{rerank_hits, MAX_RERANK_CANDIDATES, MAX_RERANK_RESULTS};
 pub use retrieval::{
-    CitationPassage, HybridRetrievalError, IndexedChunk, RetrievalError, RetrievalService,
-    SearchHit, HYBRID_CANDIDATE_LIMIT,
+    CitationPassage, HybridRetrievalError, IndexedChunk, RetainedImage, RetrievalError,
+    RetrievalService, SearchHit, HYBRID_CANDIDATE_LIMIT,
 };
 pub use task::{TaskContext, TaskEvent, TaskManager, TaskPhase, TaskState};
 pub use task_journal::{TaskJournal, TaskJournalError};

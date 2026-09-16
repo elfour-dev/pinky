@@ -197,10 +197,29 @@ Do not use a broader approved directory than you are comfortable granting just
 to silence the error.
 
 Currently extractable formats are UTF-8 text, Markdown, logs, source code, JSON,
-YAML, XML, HTML, and CSV. Other files are retained safely but marked
-`unsupported`; image metadata/OCR is the next planned ingestion phase. PDF and
-Office extraction are intentionally deferred until after image support, while
-web ingestion remains a later phase.
+YAML, XML, HTML, and CSV. PNG, JPEG, WebP, GIF, and TIFF files also retain
+searchable technical metadata such as dimensions, channels, alpha, animation,
+and orientation where available. Image rows expose a bounded local OCR action,
+and image citations can open the exact retained pixels. Other files are
+retained safely but marked `unsupported`; PDF and Office extraction are
+intentionally deferred until after image support, while web ingestion remains a
+later phase.
+
+### Use image OCR
+
+Install a local OCR executable such as Tesseract yourself, then retain an image
+inside an approved root. In the Sources list, select **OCR** beside the image,
+enter the absolute executable path (for example `/usr/bin/tesseract`) and a
+short language code such as `eng`. Pinky runs the worker as a cancellable,
+supervised task. Its temporary input and output stay under the mounted vault;
+the normalized result is encrypted, attached to that image version, and becomes
+searchable with ordinary source search. Re-running OCR for the same version is
+refused so a later edit creates a fresh source version instead.
+
+When a search result cites an image, open the citation and choose **View
+retained pixels** to display the exact archived bytes. This is an explicit
+second request so merely searching image metadata does not copy pixels through
+the desktop IPC path.
 
 Pinky watches successfully ingested local files. After a file becomes stable,
 an edit creates a new retained and searchable version. If replacement indexing

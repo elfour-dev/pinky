@@ -7,7 +7,7 @@ import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
 import { isReconnectableError } from "./reliability";
-import type { AnswerEnvelope, AskQuestionResponse, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, HybridConfiguration, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import type { AnswerEnvelope, AskQuestionResponse, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, HybridConfiguration, RetainedImage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
 import type { EntityState } from "./entity";
 import { canAsk } from "./types";
 
@@ -56,6 +56,9 @@ export function App() {
   const [conversationMessages, setConversationMessages] = useState<ConversationMessage[]>([]);
   const [conversationError, setConversationError] = useState("");
   const [citation, setCitation] = useState<CitationPassage | null>(null);
+  const [retainedImage, setRetainedImage] = useState<RetainedImage | null>(null);
+  const [imageLoading, setImageLoading] = useState(false);
+  const [imageError, setImageError] = useState("");
   const [setupOpen, setSetupOpen] = useState(false);
   const [setupPaths, setSetupPaths] = useState<VaultPaths>({ cipher_dir: "", mount_dir: "" });
   const [passphrase, setPassphrase] = useState("");
@@ -67,6 +70,11 @@ export function App() {
   const [approvedRoot, setApprovedRoot] = useState("");
   const [sourcePath, setSourcePath] = useState("");
   const [sourceError, setSourceError] = useState("");
+  const [ocrSource, setOcrSource] = useState<SourceSummary | null>(null);
+  const [ocrExecutable, setOcrExecutable] = useState("/usr/bin/tesseract");
+  const [ocrLanguage, setOcrLanguage] = useState("eng");
+  const [ocrError, setOcrError] = useState("");
+  const [ocrRunning, setOcrRunning] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [modelProvider, setModelProvider] = useState<"ollama" | "llama-server">("ollama");
   const [modelEndpoint, setModelEndpoint] = useState("http://127.0.0.1:11434");
@@ -138,6 +146,10 @@ export function App() {
         setEvents((current) => mergeTaskEvents(current, [payload]));
         if (payload.state === "completed" && payload.phase.name === "local ingestion") {
           void invoke<SourceSummary[]>("list_sources").then(setSources).catch(() => undefined);
+        }
+        if (["completed", "failed", "cancelled"].includes(payload.state) && payload.phase.name === "image OCR") {
+          if (payload.state === "completed") void invoke<SourceSummary[]>("list_sources").then(setSources).catch(() => undefined);
+          setOcrRunning(false);
         }
         if (payload.state === "completed" && payload.phase.name === "cited answer") {
           void refreshConversations();
@@ -236,8 +248,26 @@ export function App() {
   const showCitation = async (uri: string) => {
     if (!IS_TAURI) return;
     setSearchError("");
+    setRetainedImage(null); setImageError("");
     try { setCitation(await invoke<CitationPassage>("open_citation", { citationUri: uri })); }
     catch (error) { setSearchError(String(error)); }
+  };
+  const showRetainedImage = async () => {
+    if (!IS_TAURI || !citation || !citation.mime_type.startsWith("image/")) return;
+    setImageError(""); setImageLoading(true);
+    try { setRetainedImage(await invoke<RetainedImage>("open_retained_image", { citationUri: citation.citation_uri })); }
+    catch (error) { setImageError(String(error)); }
+    finally { setImageLoading(false); }
+  };
+  const openOcr = (source: SourceSummary) => { setOcrSource(source); setOcrExecutable("/usr/bin/tesseract"); setOcrLanguage("eng"); setOcrError(""); };
+  const runOcr = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!IS_TAURI || !ocrSource) return;
+    setOcrError(""); setOcrRunning(true);
+    try {
+      await invoke<string>("ocr_image", { request: { source_id: ocrSource.source_id, version_id: ocrSource.version_id, executable: ocrExecutable, language: ocrLanguage } });
+      setOcrSource(null);
+    } catch (error) { setOcrError(String(error)); setOcrRunning(false); }
   };
   const newConversation = async () => {
     if (!IS_TAURI || !status.vault_mounted) return;
@@ -245,7 +275,7 @@ export function App() {
     setConversationError("");
     setAskError("");
     setSearchError("");
-    setCitation(null);
+    setCitation(null); setRetainedImage(null); setImageError("");
     setAnswer(null);
     setSearchHits([]);
     setMessage("");
@@ -409,7 +439,7 @@ export function App() {
       <button className="new-chat" disabled={!status.vault_mounted} onClick={() => void newConversation()} title={status.vault_mounted ? "Create an encrypted conversation" : "Unlock the vault before creating a conversation"}><Plus size={15} /> New conversation</button>
         <nav>
         <NavGroup icon={<MessageSquare />} label="Chats" count={String(conversations.length)}>{conversations.length ? conversations.map((conversation) => <div className={`chat-row ${conversation.id === activeConversationId ? "active" : ""}`} key={conversation.id}><button className="chat-select" onClick={() => { setMode("ask"); selectConversation(conversation.id); }}><MessageSquare size={12} /><span>{conversation.title}</span></button><button className="chat-action" aria-label={`Rename ${conversation.title}`} title="Rename conversation" onClick={() => void renameConversation(conversation)}><Pencil size={11} /></button><button className="chat-action danger" aria-label={`Delete ${conversation.title}`} title="Delete conversation" onClick={() => void deleteConversation(conversation)}><Trash2 size={11} /></button></div>) : <p className="empty-nav">No conversations yet</p>}{conversationError && <p className="nav-error" role="alert">{conversationError}</p>}</NavGroup>
-        <NavGroup icon={<Database />} label="Sources" count={String(sources.length)}><button className="nav-row" disabled={!status.vault_mounted} onClick={openSource}><Plus size={13} /> Add source</button>{sources.map((source) => <div className="source-row" key={source.source_id} title={source.canonical_uri}><FileText size={12} /><div><strong>{source.display_name}</strong><small>{source.state === "active" ? `${source.chunk_count} chunk${source.chunk_count === 1 ? "" : "s"}` : source.state}</small></div></div>)}</NavGroup>
+        <NavGroup icon={<Database />} label="Sources" count={String(sources.length)}><button className="nav-row" disabled={!status.vault_mounted} onClick={openSource}><Plus size={13} /> Add source</button>{sources.map((source) => <div className="source-row" key={source.source_id} title={source.canonical_uri}><FileText size={12} /><div><strong>{source.display_name}</strong><small>{source.state === "active" ? `${source.chunk_count} chunk${source.chunk_count === 1 ? "" : "s"}` : source.state}</small></div>{source.state === "active" && source.mime_type.startsWith("image/") && <button className="source-action" type="button" disabled={ocrRunning} onClick={() => openOcr(source)}>OCR</button>}</div>)}</NavGroup>
         <NavGroup icon={<BookOpen />} label="Dossiers" count="0" />
         <NavGroup icon={<FolderKey />} label="Workspaces" count="0"><button className="nav-row"><Plus size={13} /> Approve directory</button></NavGroup>
       </nav>
@@ -505,14 +535,28 @@ export function App() {
     </div>}
     {sourceOpen && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeSource(); }}>
       <section className="setup-modal source-modal" role="dialog" aria-modal="true" aria-labelledby="source-title">
-        <header><div><p className="eyebrow">APPROVED LOCAL SOURCE</p><h2 id="source-title">Retain a local text file</h2></div><button aria-label="Close source setup" onClick={closeSource}><X size={17} /></button></header>
+        <header><div><p className="eyebrow">APPROVED LOCAL SOURCE</p><h2 id="source-title">Retain a local source</h2></div><button aria-label="Close source setup" onClick={closeSource}><X size={17} /></button></header>
         <form onSubmit={runIngestion}>
           <div className="setup-intro"><FolderKey size={21} /><p>The approved root is the directory Pinky may access. The source must resolve inside it; devices, sockets, directories, and symlink escapes are rejected.</p></div>
           <label>Approved directory<input value={approvedRoot} onChange={(event) => setApprovedRoot(event.target.value)} placeholder="/home/you/Documents" spellCheck={false} required /></label>
           <label>Source file<input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="/home/you/Documents/notes.md" spellCheck={false} required /></label>
-          <p className="source-support">Currently extractable: UTF-8 text, Markdown, logs, source code, JSON, YAML, XML, HTML, and CSV. Other formats are safely archived and marked unsupported.</p>
+          <p className="source-support">Currently searchable: UTF-8 text, Markdown, logs, source code, JSON, YAML, XML, HTML, CSV, and image metadata for PNG, JPEG, WebP, GIF, and TIFF. Image rows can run a bounded local OCR worker and citations can open the exact retained pixels. Other formats are safely archived and marked unsupported.</p>
           {sourceError && <p className="setup-error" role="alert">{sourceError}</p>}
           <footer><button type="button" onClick={closeSource}>Cancel</button><button className="primary">Archive and extract</button></footer>
+        </form>
+      </section>
+    </div>}
+    {ocrSource && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !ocrRunning) setOcrSource(null); }}>
+      <section className="setup-modal source-modal" role="dialog" aria-modal="true" aria-labelledby="ocr-title">
+        <header><div><p className="eyebrow">RETAINED IMAGE</p><h2 id="ocr-title">Extract text with local OCR</h2></div><button aria-label="Close OCR setup" disabled={ocrRunning} onClick={() => setOcrSource(null)}><X size={17} /></button></header>
+        <form onSubmit={runOcr}>
+          <div className="setup-intro"><FileText size={21} /><p>The worker receives only the retained image, runs as a supervised process, and writes temporary input/output under the mounted vault. OCR text is retained as encrypted searchable chunks.</p></div>
+          <p className="source-support"><strong>{ocrSource.display_name}</strong> · {ocrSource.mime_type} · version {ocrSource.version_id}</p>
+          <label>OCR executable<input value={ocrExecutable} onChange={(event) => setOcrExecutable(event.target.value)} placeholder="/usr/bin/tesseract" spellCheck={false} required /></label>
+          <label>Language code<input value={ocrLanguage} onChange={(event) => setOcrLanguage(event.target.value)} placeholder="eng" spellCheck={false} required /></label>
+          <p className="source-support">Install Tesseract separately if this path does not exist. Pinky does not download OCR runtimes or send pixels to a remote service.</p>
+          {ocrError && <p className="setup-error" role="alert">{ocrError}</p>}
+          <footer><button type="button" disabled={ocrRunning} onClick={() => setOcrSource(null)}>Cancel</button><button className="primary" disabled={ocrRunning}>{ocrRunning ? "Running supervised OCR…" : "Run OCR"}</button></footer>
         </form>
       </section>
     </div>}
@@ -520,6 +564,7 @@ export function App() {
       <section className="setup-modal citation-modal" role="dialog" aria-modal="true" aria-labelledby="citation-title">
         <header><div><p className="eyebrow">RETAINED SOURCE SNAPSHOT</p><h2 id="citation-title">{citation.display_name}</h2></div><button aria-label="Close citation" onClick={() => setCitation(null)}><X size={17} /></button></header>
         <div className="citation-provenance"><span>{citation.mime_type}</span><span>{formatCoordinates(citation.coordinates)}</span><span>Retrieved {new Date(citation.retrieved_at).toLocaleString()}</span></div>
+        {citation.mime_type.startsWith("image/") && <div className="image-viewer"><button type="button" className="primary" disabled={imageLoading} onClick={() => void showRetainedImage()}>{imageLoading ? "Loading retained pixels…" : retainedImage ? "Reload retained pixels" : "View retained pixels"}</button>{imageError && <p className="setup-error" role="alert">{imageError}</p>}{retainedImage && <img className="retained-image" src={`data:${retainedImage.mime_type};base64,${retainedImage.bytes_base64}`} alt={`Retained ${retainedImage.display_name}`} />}</div>}
         <pre>{citation.passage}</pre><code>{citation.citation_uri}</code><p className="citation-origin" title={citation.canonical_uri}>{citation.canonical_uri}</p>
       </section>
     </div>}

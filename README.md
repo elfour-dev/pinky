@@ -53,8 +53,11 @@ text-ingestion and lexical-search slices are usable from the Sources panel and
 composer. When a local Ollama model is attached, **Ask** mode retrieves retained
 passages and produces validated, cited answers; **Search** mode remains an
 explicit lexical lookup. Hybrid vector retrieval is available as an opt-in
-development path. Image ingestion and OCR are the next prioritised product
-phase; PDF and Office extraction are deliberately deferred until after it.
+development path. Image metadata ingestion and a bounded supervised OCR worker
+are now available in the core. Image rows can attach bounded OCR results as
+encrypted searchable chunks, and image citations can open the exact retained
+pixels. PDF and Office extraction are deliberately deferred until after image
+support acceptance.
 Image generation, automatic research, generated-code containers, backup/restore,
 and the later release gates remain unimplemented. Retained-data operations
 remain disabled while the vault is unavailable.

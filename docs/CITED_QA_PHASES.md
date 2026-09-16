@@ -359,23 +359,36 @@ gates remain.
 
 ## R8 — prioritised image support
 
-Status: planned as the next product phase after R7. PDF and Office extraction
-are explicitly deferred until this phase and its acceptance gates pass.
+Status: complete for the retained local-image path. Image metadata ingestion,
+bounded supervised OCR attachment, explicit retained-image viewing, worker
+cancellation, and restart-safe searchable retention are implemented and
+verified. PDF and Office extraction remain deliberately deferred.
+PDF and Office extraction are explicitly deferred until this phase and its
+acceptance gates pass.
 
 Contract: approved image files remain encrypted, versioned, cancellable, and
 inspectable without leaking pixels, OCR text, or metadata outside the mounted
 vault.
 
-Planned scope:
+Implemented and planned scope:
 
-- image metadata ingestion for PNG, JPEG, WebP, GIF, and TIFF;
-- bounded OCR in an isolated worker, with the original image retained;
-- exact retained-image viewing and source/version metadata;
-- cancellation of metadata/OCR work, quarantined partial extraction, and exact
-  reopening of retained image artifacts.
+- [x] image metadata ingestion for PNG, JPEG, WebP, GIF, and TIFF;
+- [x] encrypted retention of the original image and searchable retained JSON
+  metadata with a versioned extraction method;
+- [x] bounded OCR worker staging inside the mounted vault, with supervised
+  process-group cancellation and an 8 MiB output bound;
+- [x] OCR result attachment to source versions and searchable OCR citations;
+- [x] exact retained-image viewing and source/version metadata;
+- [x] cancellation of metadata/OCR work, discarded partial extraction, and
+  exact reopening of retained image artifacts;
+- [x] restart recovery keeps OCR chunks searchable and citations valid.
 
-R8 gates will cover vault-only pixel and OCR retention, deterministic image
-metadata, isolated-worker limits, cancellation, and clean restart recovery.
+R8 gates cover vault-only pixel and OCR retention, deterministic image metadata,
+isolated-worker limits, cancellation, and clean restart recovery. The dedicated
+image cancellation test proves the supervised process is terminated and its
+staging files are removed; the offline restart fixture reopens the vault and
+searches the attached OCR citation again; the oversized-output fixture proves
+the 8 MiB bound rejects and removes excessive OCR output.
 
 ## Parallel and deferred tracks
 
