@@ -21,6 +21,7 @@ pub mod qa;
 pub mod qdrant;
 pub mod recovery;
 pub mod reranking;
+pub mod research;
 pub mod retrieval;
 pub mod task;
 pub mod task_journal;
@@ -78,6 +79,14 @@ pub use qdrant::{
 };
 pub use recovery::{RecoveryEnvelope, RecoveryError, VaultKey, VaultSubkeys};
 pub use reranking::{rerank_hits, MAX_RERANK_CANDIDATES, MAX_RERANK_RESULTS};
+pub use research::{
+    build_public_client, fetch_public_body, normalize_search_queries, PublicSearchResult,
+    PublicUrl, PublicWebPolicy, ResearchBudgetV1, ResearchError, ResolvedPublicUrl, SearxngClient,
+    DEFAULT_CRAWL_DEPTH, DEFAULT_MAX_CONCURRENT_REQUESTS, DEFAULT_MAX_DOCUMENTS,
+    DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_MAX_DURATION_SECONDS, DEFAULT_MAX_PAGES_PER_ORIGIN,
+    DEFAULT_MIN_ORIGIN_INTERVAL, MAX_SEARCH_QUERIES, MAX_SEARCH_QUERY_BYTES,
+    MAX_SEARCH_RESPONSE_BYTES, MAX_SEARCH_RESULTS, MAX_SEARCH_TEXT_BYTES, RESEARCH_SCHEMA_VERSION,
+};
 pub use retrieval::{
     CitationPassage, HybridRetrievalError, IndexedChunk, RetainedImage, RetrievalError,
     RetrievalService, SearchHit, HYBRID_CANDIDATE_LIMIT,
