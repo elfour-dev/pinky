@@ -120,30 +120,40 @@ export function App() {
     const frame = window.requestAnimationFrame(() => conversationRef.current?.scrollTo({ top: conversationRef.current.scrollHeight, behavior: reducedMotion ? "auto" : "smooth" }));
     return () => window.cancelAnimationFrame(frame);
   }, [activeView, reducedMotion, submittedPrompt]);
-  const loadConversation = async (conversationId: string, expectedAskRun?: number) => {
-    if (!IS_TAURI) return;
-    if (expectedAskRun !== undefined && expectedAskRun !== askRun.current) return;
+  useEffect(() => {
+    if (!submittedPrompt) return;
+    const latestUserMessage = [...conversationMessages].reverse().find((message) => message.role === "user");
+    if (latestUserMessage?.content === submittedPrompt.text) setSubmittedPrompt(null);
+  }, [conversationMessages, submittedPrompt]);
+  const loadConversation = async (conversationId: string, expectedAskRun?: number): Promise<boolean> => {
+    if (!IS_TAURI) return false;
+    if (expectedAskRun !== undefined && expectedAskRun !== askRun.current) return false;
     setConversationError("");
     try {
       const detail = await invoke<ConversationDetail>("get_conversation", { conversationId });
-      if (expectedAskRun !== undefined && expectedAskRun !== askRun.current) return;
+      if (expectedAskRun !== undefined && expectedAskRun !== askRun.current) return false;
       setActiveConversationId(conversationId);
       setConversationMessages(detail.messages);
+      return true;
     } catch (error) {
       if (expectedAskRun === undefined || expectedAskRun === askRun.current) setConversationError(String(error));
+      return false;
     }
   };
-  const refreshConversations = async (preferredId?: string, expectedAskRun?: number) => {
-    if (!IS_TAURI) return;
+  const refreshConversations = async (preferredId?: string, expectedAskRun?: number): Promise<boolean> => {
+    if (!IS_TAURI) return false;
     try {
       const list = await invoke<ConversationSummary[]>("list_conversations");
-      if (expectedAskRun !== undefined && expectedAskRun !== askRun.current) return;
+      if (expectedAskRun !== undefined && expectedAskRun !== askRun.current) return false;
       setConversations(list);
       const next = preferredId || activeConversationId || list[0]?.id;
-      if (next && list.some((conversation) => conversation.id === next)) await loadConversation(next, expectedAskRun);
-      else { setActiveConversationId(null); setConversationMessages([]); }
+      if (next && list.some((conversation) => conversation.id === next)) return loadConversation(next, expectedAskRun);
+      setActiveConversationId(null);
+      setConversationMessages([]);
+      return true;
     } catch (error) {
       if (expectedAskRun === undefined || expectedAskRun === askRun.current) setConversationError(String(error));
+      return false;
     }
   };
   const refreshAssetCount = async () => {
@@ -287,7 +297,6 @@ export function App() {
         if (run === askRun.current) {
           setAnswer(result.answer);
           await refreshConversations(result.conversation_id, run);
-          setSubmittedPrompt(null);
         }
       } catch (error) {
         if (run === askRun.current) {
@@ -304,7 +313,9 @@ export function App() {
       }
       return;
     }
-    setAnswer(null); setSearching(true);
+    // Search is additive: keep the current conversation and any validated
+    // answer visible while matching evidence is loaded below it.
+    setSearching(true);
     try {
       setSearchHits(await invoke<SearchHit[]>("search_sources", { query, limit: 8 }));
     } catch (error) { setSearchError(String(error)); }
@@ -517,7 +528,7 @@ export function App() {
     </aside>
 
     <section className="centre-panel" id="conversation" aria-label="Conversation">
-      <div className="topbar"><div className="crumb">Retained knowledge <ChevronRight size={13} /> <span>{activeView === "assets" ? "Asset library" : mode === "ask" ? "Cited answer" : "Lexical search"}</span></div><div className="topbar-actions"><button type="button" className="ambient-launcher" onClick={openAmbient} disabled={!IS_TAURI} title="Open Ambient ALMA"><Sparkles size={13} /> Ambient</button>{activeView === "assets" ? <button type="button" className="asset-back" onClick={openConversation}><ArrowLeft size={13} /> Back to chat</button> : <div className="mode-switch" role="group" aria-label="Conversation mode"><button className={mode === "ask" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("ask"); setSearchHits([]); setSearchError(""); }} aria-pressed={mode === "ask"}>Ask</button><button className={mode === "search" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("search"); setAnswer(null); setAskError(""); }} aria-pressed={mode === "search"}><Search size={13} /> Search</button></div>}</div></div>
+      <div className="topbar"><div className="crumb">Retained knowledge <ChevronRight size={13} /> <span>{activeView === "assets" ? "Asset library" : mode === "ask" ? "Cited answer" : "Lexical search"}</span></div><div className="topbar-actions"><button type="button" className="ambient-launcher" onClick={openAmbient} disabled={!IS_TAURI} title="Open Ambient ALMA"><Sparkles size={13} /> Ambient</button>{activeView === "assets" ? <button type="button" className="asset-back" onClick={openConversation}><ArrowLeft size={13} /> Back to chat</button> : <div className="mode-switch" role="group" aria-label="Conversation mode"><button className={mode === "ask" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("ask"); setSearchHits([]); setSearchError(""); }} aria-pressed={mode === "ask"}>Ask</button><button className={mode === "search" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("search"); setAskError(""); }} aria-pressed={mode === "search"}><Search size={13} /> Search</button></div>}</div></div>
       {activeView === "assets" ? <AssetLibrary refreshKey={assetRefreshKey} vaultMounted={status.vault_mounted} onAddSource={openSource} onOpenCitation={(uri) => void showCitation(uri)} onOpenOcr={openOcr} /> : <>
       <div className="conversation" ref={conversationRef} role="region" aria-label="Conversation and search results" tabIndex={0}>
         <div className="entity-stage"><AsciiEntity state={entityState} reducedMotion={reducedMotion} /><span className={`state-pill ${entityState}`} aria-live="polite"><i /> ALMA · {entityState}</span></div>
@@ -672,7 +683,13 @@ function AnswerView({ answer, onCitation }: { answer: AnswerEnvelope; onCitation
 }
 
 function CitationLinks({ citations, onCitation, label }: { citations: string[]; onCitation: (uri: string) => void; label: string }) {
-  return <div className="answer-citations" aria-label={label}>{citations.map((citation) => <button key={citation} onClick={() => onCitation(citation)}>{citation.replace("pinky://", "")}</button>)}</div>;
+  return <div className="answer-citations" aria-label={label}>{citations.map((citation, index) => <button key={citation} title={citation} aria-label={`Open citation ${citation}`} onClick={() => onCitation(citation)}>{compactCitationLabel(citation, index)}</button>)}</div>;
+}
+
+function compactCitationLabel(citation: string, index: number) {
+  const coordinate = citation.match(/^pinky:\/\/source\/[^/]+\/version\/[^#]+#(.+)$/)?.[1];
+  const readableCoordinate = coordinate?.replace(/^chunk-/, "chunk ");
+  return readableCoordinate ? `Source ${index + 1} · ${readableCoordinate}` : `Source ${index + 1}`;
 }
 
 function AssetLibrary({ refreshKey, vaultMounted, onAddSource, onOpenCitation, onOpenOcr }: { refreshKey: number; vaultMounted: boolean; onAddSource: () => void; onOpenCitation: (uri: string) => void; onOpenOcr: (source: SourceSummary) => void }) {
