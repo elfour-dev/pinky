@@ -6,10 +6,14 @@ usage() {
 Usage: scripts/bootstrap-dev.sh [--skip-e2e]
 
 Install the Debian/Ubuntu development prerequisites, Rust components, the
-locked JavaScript dependencies, and (unless skipped) tauri-driver.
+locked JavaScript dependencies, the Poppler PDF text runtime, the Tesseract
+OCR runtime, the ImageMagick OCR preprocessing tool, and (unless skipped)
+tauri-driver.
 
-This script does not install Ollama, model files, or Qdrant. Those are large,
-optional runtimes and must be installed/configured separately.
+This script does not install Ollama or model files. Qdrant is also not
+installed automatically; use scripts/install-qdrant-dev.sh for the pinned
+development-only Qdrant sidecar, or use the future signed artifact onboarding
+for release acceptance.
 EOF
 }
 
@@ -76,6 +80,7 @@ apt_packages=(
   git
   gnome-keyring
   gocryptfs
+  imagemagick
   libayatana-appindicator3-dev
   libdbus-1-dev
   libgtk-3-dev
@@ -87,7 +92,10 @@ apt_packages=(
   npm
   pkg-config
   patchelf
+  poppler-utils
   podman
+  tesseract-ocr
+  tesseract-ocr-eng
   vulkan-tools
   webkit2gtk-driver
   wget
@@ -158,6 +166,10 @@ printf '  npm:         %s\n' "$(npm --version)"
 printf '  gocryptfs:   %s\n' "$(gocryptfs --version 2>&1 | head -n 1)"
 printf '  secret-tool: %s\n' "$(command -v secret-tool)"
 printf '  Podman:      %s\n' "$(podman --version)"
+printf '  Tesseract:   %s\n' "$(tesseract --version 2>&1 | head -n 1)"
+printf '  ImageMagick: %s\n' "$(magick --version 2>&1 | head -n 1)"
+printf '  pdftotext:   %s\n' "$(command -v pdftotext || printf 'missing')"
+printf '  pdftoppm:    %s\n' "$(command -v pdftoppm || printf 'missing')"
 vulkan_status='not available'
 if command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1; then
   vulkan_status='available'
@@ -176,6 +188,8 @@ Next steps:
   npm run build
   npm run tauri dev
 
-Ollama, its model files, and Qdrant are intentionally not downloaded by this
-script. See README.md for the optional local-model and hybrid-retrieval setup.
+Ollama and its model files are intentionally not downloaded by this script.
+For development-only Qdrant setup, run:
+  scripts/install-qdrant-dev.sh
+See README.md for the local-model and hybrid-retrieval setup.
 EOF

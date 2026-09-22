@@ -12,6 +12,7 @@ prerequisites for Pinky Lite.
 
 The authoritative delivery sequence, contracts, and gates are in
 [`CITED_QA_PHASES.md`](CITED_QA_PHASES.md).
+The ordered remaining-feature roadmap is in [`ROADMAP.md`](ROADMAP.md).
 
 ## Phase baseline before R3
 
@@ -95,14 +96,20 @@ The deterministic fake llama-server test needs loopback permission; the
 restricted filesystem sandbox returned `EPERM`, and the same suite passed when
 run with explicit local-loopback permission.
 
-## Next implementation slice: R7 onboarding and release acceptance
+## Next implementation slice: close R7, then close R9
 
-Run the remaining SSH-specific process-boundary check described in
-`CITED_QA_PHASES.md`, then continue with R7 onboarding and release acceptance.
+Do not begin R10 or any later feature work. First close the remaining R7
+target-host acceptance checks (signed artifact installation, retained-chunk
+backfill, warm benchmark, and the SSH-specific process-boundary review).
+After R7 is closed, run the interrupted-process PDF acceptance needed to close
+R9. Only then may the next phase be selected.
 R7 now includes the bounded embedding
 provider/indexer contract, current retained-chunk loading for backfill,
 citation-preserving fusion, a separate Ollama embedding-model probe with a
-smoke vector, and cancellable core hybrid-search orchestration. An opt-in
+smoke vector, and cancellable core hybrid-search orchestration. Retained-chunk
+backfill now records each successful batch and resumes safely after
+cancellation or restart; Qdrant collections are isolated per embedding model
+identity. An opt-in
 desktop bridge now validates the embedding model, lazily starts and reuses one
 supervised Qdrant sidecar per application session, and reports retrieval
 phases when the three documented environment values are set. The runtime panel
@@ -124,9 +131,13 @@ chunks to the current source version, and cleans up on completion or
 cancellation. Image citations can explicitly load the exact retained pixels.
 Deterministic cancellation and vault-reopen acceptance fixtures now pass, so R8
 is complete for this retained-image scope.
-Image generation is deferred to a later creative-tools phase. PDF and Office
-extraction are deferred until after R8; do not start those extractors as the
-next slice.
+Image generation is deferred to a later creative-tools phase. R9 PDF extraction
+now has bounded Poppler embedded-text extraction plus optional image-only page
+rendering and local Tesseract OCR, with page-aware citations. Local R9 fixture
+and restart checks pass; the remaining slice is interrupted target-host
+acceptance. Keep DOCX,
+XLSX, PPTX, and ODT extraction separate and defer it to a final-stage
+document-compatibility milestone.
 
 ## Orientation commands
 

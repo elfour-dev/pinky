@@ -10,7 +10,10 @@ pub const MAX_PROMPT_BYTES: usize = 256 * 1024;
 pub const MAX_SCHEMA_BYTES: usize = 64 * 1024;
 pub const MAX_INFERENCE_REQUEST_BYTES: usize = 512 * 1024;
 pub const MAX_INFERENCE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_OUTPUT_TOKENS: u32 = 4_096;
+// Cited answers are intentionally concise. Keeping this bounded prevents a
+// slow local model from spending minutes producing an unnecessarily large
+// response while leaving room for several citation URIs.
+pub const MAX_OUTPUT_TOKENS: u32 = 512;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -14,6 +14,9 @@ use crate::retrieval::SearchHit;
 pub const MAX_RERANK_CANDIDATES: usize = 30;
 /// Maximum number of passages returned to the answer/context selector.
 pub const MAX_RERANK_RESULTS: usize = 12;
+/// Scores at or below this boundary contain no meaningful query-term coverage
+/// under the deterministic reranker and must not be treated as answer evidence.
+pub const MIN_CONFIDENT_RERANK_SCORE: f32 = 0.55;
 
 /// Rerank at most [`MAX_RERANK_CANDIDATES`] fused hits and return at most
 /// [`MAX_RERANK_RESULTS`] citations. The fused score is used as one component

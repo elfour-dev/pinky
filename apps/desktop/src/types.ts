@@ -30,6 +30,7 @@ export interface HybridConfiguration { qdrant_executable: string; embedding_endp
 export interface SourceSummary {
   source_id: string;
   version_id: string;
+  kind: "local_file" | "web_page" | "search_result" | "generated";
   display_name: string;
   canonical_uri: string;
   mime_type: string;
@@ -37,6 +38,20 @@ export interface SourceSummary {
   chunk_count: number;
   state: string;
   updated_at: string;
+}
+export type AssetSort = "updated" | "name" | "size" | "type";
+export interface AssetListQuery {
+  search?: string;
+  kind?: SourceSummary["kind"];
+  state?: "active" | "missing" | "blocked" | "unsupported";
+  sort?: AssetSort;
+  cursor?: string;
+  limit?: number;
+}
+export interface AssetListResponse {
+  items: SourceSummary[];
+  total: number;
+  next_cursor: string | null;
 }
 export interface SearchHit {
   score: number;
@@ -48,7 +63,7 @@ export interface SearchHit {
   display_name: string;
   heading: string | null;
   passage: string;
-  coordinates: { line_start?: number; line_end?: number } | null;
+  coordinates: { line_start?: number; line_end?: number; ocr?: boolean; image_metadata?: boolean } | null;
   retrieved_at: string;
 }
 export interface CitationPassage extends Omit<SearchHit, "score"> {

@@ -16,6 +16,7 @@ pub mod llama;
 pub mod object_store;
 pub mod ollama;
 pub mod onboarding;
+pub mod pdf;
 pub mod process;
 pub mod qa;
 pub mod qdrant;
@@ -35,7 +36,7 @@ pub use conversation::{
     ConversationDetail, ConversationError, ConversationMessage, ConversationService,
     ConversationSummary, MessageDraft,
 };
-pub use database::{Database, DatabaseError, HybridConfiguration};
+pub use database::{Database, DatabaseError, HybridConfiguration, OllamaConfiguration};
 pub use embedding::{
     EmbeddingError, EmbeddingFuture, EmbeddingIndexError, EmbeddingIndexer, EmbeddingProvider,
     EmbeddingResponse, DEFAULT_EMBEDDING_BATCH_SIZE, MAX_EMBEDDING_ERROR_BYTES,
@@ -46,7 +47,9 @@ pub use hybrid::{
 };
 pub use image::{
     extract_image_metadata, ImageMetadata, ImageMetadataError, ImageOcrError, ImageOcrWorker,
-    IMAGE_METADATA_VERSION, MAX_IMAGE_METADATA_BYTES, MAX_OCR_TEXT_BYTES,
+    AUTO_OCR_CONFIDENCE_THRESHOLDS, AUTO_OCR_PAGE_SEGMENTATION_MODES, DEFAULT_OCR_MIN_CONFIDENCE,
+    DEFAULT_OCR_PAGE_SEGMENTATION_MODE, IMAGE_METADATA_VERSION, MAX_IMAGE_METADATA_BYTES,
+    MAX_OCR_TEXT_BYTES, OCR_WORKER_FILE_BYTES, OCR_WORKER_MEMORY_BYTES,
 };
 pub use inference::{
     InferenceError, InferenceFuture, InferenceMetrics, InferenceProvider, InferenceResponse,
@@ -54,8 +57,8 @@ pub use inference::{
     MAX_OUTPUT_TOKENS, MAX_PROMPT_BYTES, MAX_SCHEMA_BYTES, MAX_SYSTEM_BYTES,
 };
 pub use ingestion::{
-    IngestedSource, IngestionError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget,
-    SourceSummary,
+    AssetListQuery, AssetListResponse, IngestedSource, IngestionError, LocalFileFingerprint,
+    LocalIngestor, LocalWatchTarget, SourceSummary,
 };
 pub use llama::{LlamaClient, LlamaError, LlamaHealth, LlamaRuntimeInfo, MIN_CHAT_CONTEXT};
 pub use object_store::{
@@ -67,12 +70,18 @@ pub use onboarding::{
     write_registration, GocryptfsMount, OnboardedVault, OnboardingError, SystemVaultPlatform,
     VaultPaths, VaultPlatform, VaultRegistration,
 };
+pub use pdf::{
+    PdfError, PdfExtraction, PdfTextExtractor, MAX_PDF_INPUT_BYTES, MAX_PDF_PAGES,
+    MAX_PDF_RENDERED_IMAGE_BYTES, MAX_PDF_RENDERED_PIXELS, MAX_PDF_TEXT_BYTES,
+    PDF_EXTRACTION_VERSION, PDF_WORKER_FILE_BYTES, PDF_WORKER_MEMORY_BYTES,
+};
 pub use process::{ProcessError, ProcessOutcome, ProcessSupervisor, ProcessTermination};
 pub use qa::{
     answer_question, answer_question_with_history, select_evidence, validate_answer, AnswerClaimV1,
-    AnswerEnvelopeV1, ClaimSupportV1, ConversationTurnV1, EvidenceV1, QaError, QuestionLimitsV1,
-    QuestionRequestV1, MAX_ANSWER_CLAIMS, MAX_CHUNKS_PER_EVIDENCE_VERSION, MAX_CONVERSATION_BYTES,
-    MAX_CONVERSATION_MESSAGES, MAX_EVIDENCE_CHUNKS, MAX_EVIDENCE_TOKENS, QA_SCHEMA_VERSION,
+    AnswerEnvelopeV1, ClaimSupportV1, ConversationTurnV1, EvidenceV1, ModelAnswerV1, ModelClaimV1,
+    QaError, QuestionLimitsV1, QuestionRequestV1, MAX_ANSWER_CLAIMS,
+    MAX_CHUNKS_PER_EVIDENCE_VERSION, MAX_CONVERSATION_BYTES, MAX_CONVERSATION_MESSAGES,
+    MAX_EVIDENCE_CHUNKS, MAX_EVIDENCE_TOKENS, QA_SCHEMA_VERSION,
 };
 pub use qdrant::{
     QdrantClient, QdrantError, QdrantLaunchConfig, QdrantSidecar, VectorMatch, VectorPoint,

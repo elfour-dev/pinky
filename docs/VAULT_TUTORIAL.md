@@ -177,6 +177,11 @@ If no watcher task appears after several seconds, confirm that you edited the
 same canonical path you originally ingested and that the runtime panel says
 the file watcher is `watching`.
 
+New files in the same approved directory are handled in the same way: leave
+them in place until their size and modification time are stable, then wait for
+the **local ingestion** discovery task. The file appears in **Sources** after
+that task completes.
+
 ## Lesson 7: Apply the workflow to your own material
 
 Start with a small, purposeful collection rather than approving your entire
@@ -204,8 +209,12 @@ For best results:
 
 The current build now archives PNG, JPEG, WebP, GIF, and TIFF files, makes
 their technical metadata searchable, can attach bounded local OCR text, and
-can open retained pixels from image citations. It does not yet summarize the pack, ingest webpages,
-extract PDF or Office documents, create dossiers, or run a local language
-model. PDF and Office are deliberately later milestones. Completing this tutorial
+can open retained pixels from image citations. The Asset Library can remove an
+individual OCR detection or all OCR detections while retaining the image. It
+does not yet summarize the pack, ingest webpages, extract Office documents,
+create dossiers, or run a local language model. PDF extraction is available
+when Poppler is installed; image-only pages are also OCRed when `pdftoppm` and
+Tesseract are available. Office extraction remains a later milestone.
+Completing this tutorial
 confirms that encrypted local retention, version watching, lexical retrieval,
 and exact citation reopening are working.

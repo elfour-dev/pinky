@@ -12,6 +12,8 @@ Planning and resumption documents:
 - [Vault setup and usage guide](docs/VAULT_GUIDE.md)
 - [Hands-on vault tutorial and example sources](docs/VAULT_TUTORIAL.md)
 - [Cited local Q&A delivery phases](docs/CITED_QA_PHASES.md)
+- [Local model and answer contract](docs/MODEL_CONTRACT.md)
+- [Remaining development roadmap](docs/ROADMAP.md)
 - [Offline self-development strategy](docs/OFFLINE_SELF_DEVELOPMENT.md)
 - [R6 privacy inspection](docs/PRIVACY_INSPECTION.md)
 - [Signed runtime artifact contract](docs/ARTIFACT_MANIFEST.md)
@@ -56,11 +58,27 @@ explicit lexical lookup. Hybrid vector retrieval is available as an opt-in
 development path. Image metadata ingestion and a bounded supervised OCR worker
 are now available in the core. Image rows can attach bounded OCR results as
 encrypted searchable chunks, and image citations can open the exact retained
-pixels. PDF and Office extraction are deliberately deferred until after image
-support acceptance.
-Image generation, automatic research, generated-code containers, backup/restore,
-and the later release gates remain unimplemented. Retained-data operations
+pixels. OCR can use a supervised ImageMagick preprocessing pass for photographed
+or skewed scans. Automatic OCR tries all Tesseract page-segmentation modes with
+bounded confidence adjustments and reports the attempted combination when it
+fails. PDF extraction now runs through bounded supervised Poppler workers when
+`pdftotext` and `pdftoppm` are installed; blank/image-only pages can be rendered
+and OCRed with local Tesseract when available, with page-aware citations. The
+full malformed/encrypted/oversized PDF acceptance matrix remains an R9 gate.
+Office extraction is deliberately reserved for a final-stage
+document-compatibility milestone. Image generation, automatic
+research, generated-code containers, backup/restore, and the later release
+gates remain unimplemented.
+Retained-data operations
 remain disabled while the vault is unavailable.
+
+The Sources sidebar has been replaced by a bounded Asset Library. It keeps only
+the asset count and navigation in the sidebar, while the centre panel provides
+metadata search, type/state filters, keyset pagination, list/grid views, exact
+retained-passage opening, image OCR actions, and per-detection or bulk OCR
+deletion. Asset metadata remains inside
+the mounted encrypted vault; image pixels are still loaded only on explicit
+citation preview.
 
 Core also contains the next retrieval foundation: a supervised, authenticated,
 loopback-only Qdrant client and the specified reciprocal-rank fusion algorithm.
@@ -76,6 +94,19 @@ export PINKY_QDRANT_EXECUTABLE=/absolute/path/to/qdrant
 export PINKY_OLLAMA_EMBEDDING_ENDPOINT=http://127.0.0.1:11434
 export PINKY_OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 ```
+
+If Qdrant is not installed, the development-only installer pins the official
+Linux x86-64 musl archive and verifies its byte size and SHA-256 before an
+atomic user-local install:
+
+```bash
+scripts/install-qdrant-dev.sh
+```
+
+It prints the `PINKY_QDRANT_EXECUTABLE` export for the installed binary. This
+is sufficient for local development validation, but it is deliberately not a
+replacement for the signed artifact manifest and trusted-key onboarding
+required by the R7 release gate.
 
 The embedding endpoint must be an explicit loopback Ollama endpoint and the
 model must be a locally installed embedding model. Pinky validates the
@@ -112,6 +143,12 @@ conversation window to the local model, validates the structured answer, and
 renders exact retained-version citations. It does not use general-knowledge
 fallback or public-web research yet.
 
+Successful Ollama attachments are saved inside the encrypted vault alongside
+the hybrid settings. On the next unlock Pinky reconnects to that endpoint and
+model automatically; the Ollama endpoint is stored without an API key. Detach
+the model to clear the saved Ollama preference. llama-server API keys remain
+session-only and must be entered again after restart.
+
 ## Setup on Debian or Ubuntu
 
 The commands below describe a fresh development installation. Do not begin with
@@ -120,9 +157,9 @@ The commands below describe a fresh development installation. Do not begin with
 ### Automated bootstrap (recommended)
 
 The repository includes an idempotent Debian/Ubuntu bootstrap for development.
-It installs the native Tauri, vault, Podman, Vulkan, and WebDriver packages,
-installs or verifies the stable Rust toolchain, fetches locked Rust crates,
-installs the locked desktop JavaScript dependencies, and installs
+It installs the native Tauri, vault, Podman, Vulkan, WebDriver, Tesseract,
+ImageMagick OCR, and Poppler PDF packages, installs or verifies the stable Rust toolchain, fetches locked
+Rust crates, installs the locked desktop JavaScript dependencies, and installs
 `tauri-driver` for native end-to-end tests:
 
 ```bash
@@ -133,14 +170,16 @@ Use `./scripts/bootstrap-dev.sh --skip-e2e` when the WebDriver acceptance suite
 is not needed. The script requires `sudo` for system packages and does not
 download Ollama, model files, or Qdrant; those optional runtimes are large and
 must be installed and configured separately. It supports Debian-family systems
-only. The remaining sections document the equivalent manual setup.
+only. English Tesseract language data (`eng`) and ImageMagick are installed for the built-in
+image OCR workflow. The remaining sections document the equivalent manual
+setup.
 
 ### Manual setup
 
 #### 1. Install native dependencies
 
-Install the current Tauri 2 Linux build dependencies together with the two
-tools required to create and unlock Pinky's encrypted vault:
+Install the current Tauri 2 Linux build dependencies together with the tools
+required to create and unlock Pinky's encrypted vault and run local image OCR:
 
 ```bash
 sudo apt update
@@ -149,6 +188,7 @@ sudo apt install -y \
   curl \
   file \
   gocryptfs \
+  imagemagick \
   libayatana-appindicator3-dev \
   libsecret-tools \
   libssl-dev \
@@ -156,6 +196,9 @@ sudo apt install -y \
   libxdo-dev \
   librsvg2-dev \
   pkg-config \
+  poppler-utils \
+  tesseract-ocr \
+  tesseract-ocr-eng \
   wget
 ```
 
@@ -280,6 +323,9 @@ and enter the absolute path of a file inside it. Pinky archives the exact opened
 file in the encrypted vault and shows ingestion progress in the task panel.
 Enter terms in the centre composer to search retained passages. Open a result's
 citation to inspect the exact archived source version and provenance.
+After the first file from an approved directory is retained, Pinky watches that
+directory recursively and automatically discovers new regular files once they
+remain stable. The new-file ingestion task then refreshes the Sources list.
 
 On Debian 13, install the native build and headless WebDriver prerequisites
 before running the Stage 1 desktop acceptance suite:

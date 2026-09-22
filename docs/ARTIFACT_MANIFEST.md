@@ -43,3 +43,12 @@ renames it atomically. Invalid or incomplete downloads are removed, and an
 existing destination is never overwritten. The implementation is in
 `crates/pinky-core/src/artifact.rs`; desktop artifact selection and signed
 release-key distribution remain gated R7 onboarding work.
+
+## Development-only Qdrant fallback
+
+Until signed release-artifact onboarding is available, developers may run
+`scripts/install-qdrant-dev.sh`. It pins the official Qdrant `v1.19.1`
+x86-64 musl archive, checks the published byte size and SHA-256, and installs
+the executable under the user data directory without root privileges. The
+installer records `verification: development_pinned_archive`; this path is
+intentionally excluded from the signed-artifact release gate.

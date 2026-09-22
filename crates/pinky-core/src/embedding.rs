@@ -69,6 +69,8 @@ pub enum EmbeddingIndexError {
     CountMismatch { found: usize, expected: usize },
     #[error("embedding dimension changed from {expected} to {found}")]
     DimensionMismatch { found: usize, expected: usize },
+    #[error("embedding identity must not be empty")]
+    EmptyIdentity,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,7 +104,28 @@ impl EmbeddingIndexer {
         chunks: &[IndexedChunk],
         cancellation: &CancellationToken,
     ) -> Result<usize, EmbeddingIndexError> {
+        self.index_chunks_with_identity(provider, qdrant, chunks, None, cancellation, |_| Ok(()))
+            .await
+    }
+
+    async fn index_chunks_with_identity<P, F>(
+        &self,
+        provider: &P,
+        qdrant: &QdrantClient,
+        chunks: &[IndexedChunk],
+        embedding_identity: Option<&str>,
+        cancellation: &CancellationToken,
+        mut after_batch: F,
+    ) -> Result<usize, EmbeddingIndexError>
+    where
+        P: EmbeddingProvider + ?Sized,
+        F: FnMut(&[uuid::Uuid]) -> Result<(), RetrievalError>,
+    {
+        if embedding_identity.is_some_and(str::is_empty) {
+            return Err(EmbeddingIndexError::EmptyIdentity);
+        }
         let mut dimension = None;
+        let mut observed_identity = embedding_identity.map(str::to_owned);
         let mut indexed = 0;
         for batch in chunks.chunks(self.batch_size) {
             if cancellation.is_cancelled() {
@@ -120,6 +143,27 @@ impl EmbeddingIndexer {
                 });
             }
             let batch_dimension = validate_vectors(&response.vectors)?;
+            let batch_identity = observed_identity
+                .get_or_insert_with(|| response.model.clone())
+                .clone();
+            if batch_identity.is_empty() || response.model.is_empty() {
+                return Err(EmbeddingIndexError::Provider(
+                    EmbeddingError::ModelMismatch {
+                        expected: batch_identity,
+                        found: response.model,
+                    },
+                ));
+            }
+            if embedding_identity.is_none()
+                && observed_identity.as_deref() != Some(response.model.as_str())
+            {
+                return Err(EmbeddingIndexError::Provider(
+                    EmbeddingError::ModelMismatch {
+                        expected: observed_identity.clone().unwrap_or_default(),
+                        found: response.model,
+                    },
+                ));
+            }
             if let Some(expected) = dimension {
                 if expected != batch_dimension {
                     return Err(EmbeddingIndexError::DimensionMismatch {
@@ -138,9 +182,12 @@ impl EmbeddingIndexer {
                     id: chunk.chunk_id,
                     source_version_id: chunk.version_id,
                     vector,
+                    embedding_identity: batch_identity.clone(),
                 })
                 .collect::<Vec<_>>();
             qdrant.upsert(batch_dimension, &points).await?;
+            let chunk_ids = batch.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>();
+            after_batch(&chunk_ids)?;
             indexed += points.len();
         }
         Ok(indexed)
@@ -156,6 +203,37 @@ impl EmbeddingIndexer {
         let chunks = retrieval.current_chunks()?;
         self.index_chunks(provider, qdrant, &chunks, cancellation)
             .await
+    }
+
+    /// Index only current chunks that have not been embedded with this exact
+    /// model identity, marking each successful batch for restart-safe
+    /// backfill. A cancelled run therefore resumes at the first uncommitted
+    /// batch instead of re-embedding the entire vault.
+    pub async fn index_current_chunks_with_identity<P: EmbeddingProvider + ?Sized>(
+        &self,
+        provider: &P,
+        qdrant: &QdrantClient,
+        retrieval: &RetrievalService,
+        embedding_identity: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<usize, EmbeddingIndexError> {
+        if embedding_identity.is_empty() {
+            return Err(EmbeddingIndexError::EmptyIdentity);
+        }
+        let chunks = retrieval.current_chunks_needing_embedding(embedding_identity)?;
+        self.index_chunks_with_identity(
+            provider,
+            qdrant,
+            &chunks,
+            Some(embedding_identity),
+            cancellation,
+            |chunk_ids| {
+                retrieval
+                    .mark_chunks_embedded(chunk_ids, embedding_identity)
+                    .map(|_| ())
+            },
+        )
+        .await
     }
 }
 

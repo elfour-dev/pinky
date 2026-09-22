@@ -216,6 +216,42 @@ impl RetrievalService {
     }
 
     pub fn current_chunks(&self) -> Result<Vec<IndexedChunk>, RetrievalError> {
+        self.load_current_chunks(None)
+    }
+
+    pub fn current_chunks_needing_embedding(
+        &self,
+        embedding_identity: &str,
+    ) -> Result<Vec<IndexedChunk>, RetrievalError> {
+        self.load_current_chunks(Some(embedding_identity))
+    }
+
+    pub fn mark_chunks_embedded(
+        &self,
+        chunk_ids: &[Uuid],
+        embedding_identity: &str,
+    ) -> Result<usize, RetrievalError> {
+        if chunk_ids.is_empty() || embedding_identity.is_empty() {
+            return Ok(0);
+        }
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| RetrievalError::DatabaseLock)?;
+        let mut statement = database
+            .connection()
+            .prepare("UPDATE chunks SET embedding_id = ?1 WHERE id = ?2")?;
+        let mut marked = 0;
+        for chunk_id in chunk_ids {
+            marked += statement.execute(params![embedding_identity, chunk_id.to_string()])?;
+        }
+        Ok(marked)
+    }
+
+    fn load_current_chunks(
+        &self,
+        embedding_identity: Option<&str>,
+    ) -> Result<Vec<IndexedChunk>, RetrievalError> {
         let database = self
             .database
             .lock()
@@ -228,10 +264,11 @@ impl RetrievalService {
              JOIN sources s ON s.id = v.source_id
              WHERE s.current_version_id = v.id
                AND s.state NOT IN ('deleted', 'unsupported')
+               AND (?1 IS NULL OR c.embedding_id IS NULL OR c.embedding_id != ?1)
              ORDER BY v.id, c.ordinal",
         )?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map([embedding_identity], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -327,6 +364,19 @@ impl RetrievalService {
         qdrant: &QdrantClient,
         cancellation: &CancellationToken,
     ) -> Result<Vec<SearchHit>, HybridRetrievalError> {
+        self.search_hybrid_with_identity(query, limit, provider, qdrant, None, cancellation)
+            .await
+    }
+
+    pub async fn search_hybrid_with_identity<P: EmbeddingProvider + ?Sized>(
+        &self,
+        query: &str,
+        limit: usize,
+        provider: &P,
+        qdrant: &QdrantClient,
+        embedding_identity: Option<&str>,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<SearchHit>, HybridRetrievalError> {
         if query.trim().is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -345,9 +395,19 @@ impl RetrievalService {
         if cancellation.is_cancelled() {
             return Err(HybridRetrievalError::Cancelled);
         }
+        let vector_future = async {
+            match embedding_identity {
+                Some(identity) => {
+                    qdrant
+                        .query_for_embedding(&query_vector, HYBRID_CANDIDATE_LIMIT, identity)
+                        .await
+                }
+                None => qdrant.query(&query_vector, HYBRID_CANDIDATE_LIMIT).await,
+            }
+        };
         let vector = tokio::select! {
             _ = cancellation.cancelled() => return Err(HybridRetrievalError::Cancelled),
-            result = qdrant.query(&query_vector, HYBRID_CANDIDATE_LIMIT) => result?,
+            result = vector_future => result?,
         };
         if cancellation.is_cancelled() {
             return Err(HybridRetrievalError::Cancelled);
@@ -821,6 +881,48 @@ mod tests {
             "Pinky stores exact retained passages about lunar geology."
         );
         assert_eq!(passage.version_id, hits[0].version_id);
+    }
+
+    #[test]
+    fn embedding_backfill_marks_only_current_chunks_for_the_selected_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(root.path(), Mounted).unwrap();
+        let database = Arc::new(Mutex::new(
+            Database::open(&vault, Zeroizing::new(vec![0x43; 32])).unwrap(),
+        ));
+        let objects = ObjectStore::new(vault);
+        let approved = tempfile::tempdir().unwrap();
+        let path = approved.path().join("facts.txt");
+        fs::write(&path, "A retained passage for embedding backfill.").unwrap();
+        let ingestor = crate::LocalIngestor::new(database.clone(), objects.clone());
+        ingestor.ingest(approved.path(), &path).unwrap();
+        let retrieval = RetrievalService::new(database, objects);
+        let chunk = retrieval.current_chunks().unwrap().pop().unwrap();
+
+        assert_eq!(
+            retrieval
+                .current_chunks_needing_embedding("ollama:test-model")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            retrieval
+                .mark_chunks_embedded(&[chunk.chunk_id], "ollama:test-model")
+                .unwrap(),
+            1
+        );
+        assert!(retrieval
+            .current_chunks_needing_embedding("ollama:test-model")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            retrieval
+                .current_chunks_needing_embedding("ollama:other-model")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

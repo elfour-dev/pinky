@@ -2,6 +2,12 @@
 
 This file is the acceptance ledger for the Pinky implementation specification.
 `[x]` means verified here and `[ ]` means not implemented or not yet accepted.
+See [`ROADMAP.md`](ROADMAP.md) for the ordered plan and entry/exit criteria for
+the remaining milestones.
+
+Phase gate: R7 and R9 are the only active incomplete phases. R10 and later are
+blocked until their remaining target-host acceptance checks pass; no later
+phase feature work should begin while either gate is open.
 
 ## Stage 1 — foundation
 
@@ -26,14 +32,25 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Approved-path local UTF-8 text ingestion, encrypted retention, versioning, and chunk metadata
 - [x] Cross-source object deduplication and symlink-escape rejection
 - [x] Stable-change local-file watching, automatic re-versioning, and missing-file state
+- [x] Keyset-paginated encrypted Asset Library with metadata search, filters, and
+  citation/OCR actions
 - [x] Image metadata ingestion for PNG, JPEG, WebP, GIF, and TIFF with
   encrypted searchable metadata retention
 - [x] Bounded supervised OCR worker contract with vault-only staging and output
   limits
 - [x] OCR result attachment and searchable OCR citations
+- [x] Automatic OCR search across all page-segmentation modes and confidence tiers
+- [x] Individual or bulk deletion of retained OCR detections with index cleanup
 - [x] explicit retained-image viewing with source/version metadata
 - [x] image cancellation and restart acceptance gates
-- [ ] PDF and Office extractors (deferred until after R8)
+- [x] Bounded supervised embedded-text PDF extraction with page-aware chunks
+  when the Poppler `pdftotext` runtime is installed
+- [x] Bounded image-only PDF page rendering and optional local Tesseract OCR
+  with page-aware text when `pdftoppm` and Tesseract are installed
+- [ ] Full PDF extraction acceptance (local fixture suite passed on 2026-09-21;
+  interrupted target-host acceptance remains)
+- [ ] Office extraction for DOCX, XLSX, PPTX, and ODT (final-stage document
+  compatibility milestone)
 - [x] Encrypted Tantivy lexical index and exact retained-version citation viewer
 - [x] Authenticated loopback Qdrant supervision/client and reciprocal-rank fusion contract
 - [x] Strict token-bearing loopback llama-server health client contract
@@ -47,14 +64,19 @@ This file is the acceptance ledger for the Pinky implementation specification.
 - [x] Signed artifact manifest verification and atomic, checksum-verified
   installation contract, including bounded streamed downloads with redirects
   rejected
+- [x] Restart-safe incremental retained-chunk embedding backfill with
+  embedding-identity-isolated Qdrant collections
 - [x] Bounded hybrid reranking over at most 30 fused candidates, returning at
   most 12 citations with deterministic relevance fixtures
+- [x] Low-confidence vector-only neighbours are rejected before cited answer
+  generation, with an explicit unresolved-evidence gap regression fixture
 - [x] One-shot cited Q&A over retained lexical evidence with explicit Ask/Search
   modes, cancellable task events, validated claims, warnings, gaps, and exact
   citation reopening
 - [ ] Signed model/Qdrant artifact onboarding, target-host retained-chunk
-  backfill, default hybrid cited chat, claims, dossiers, and the one-million
-  chunk warm p95 retrieval gate
+  backfill, default hybrid cited chat, and target-host acceptance. Local
+  one-million-chunk warm retrieval and reranking p95 checks passed on
+  2026-09-21.
 - [x] Encrypted persistent conversations with immutable ordered messages,
   bounded history, validated-answer persistence, and create/select/rename/delete
   desktop interactions
@@ -182,12 +204,13 @@ the target-host tunnel against `qwen3.5:9b`; generated text is not yet displayed
 or persisted.
 
 R3 adds the non-displayable trust boundary between retrieval and the future
-question UI. It selects no more than 12 current-version passages and 8,000
+question UI. It selects no more than 12 current-version passages and 1,500
 approximate context tokens, deduplicates chunks, caps each source version at
 three passages, and regenerates citation identifiers from trusted source,
 version, and chunk coordinates. Evidence is serialized inside a task-specific
-untrusted-data delimiter. Model output must match a bounded, versioned JSON
-contract; every summary and claim citation must be one of the supplied IDs,
+untrusted-data delimiter. Model output must match the bounded `ModelAnswerV1`
+contract and can select only request-local evidence indexes; Rust materializes
+the final citation IDs. Every summary and claim citation must be one of the supplied IDs,
 inferences must be explicit, and malformed or unsupported output receives at
 most one bounded repair attempt. Empty retrieval returns an explicit uncited
 gap without calling the model.
@@ -224,7 +247,10 @@ test ingests the Project Alder tutorial pack, validates a fixture-backed cited
 answer, reopens its exact citation, exercises an explicit evidence gap and
 pre-cancelled request, then restores the encrypted conversation after restart.
 The pinned clean-Debian install and fresh-profile E2E check pass without a
-persisted model attachment. On 2026-09-15 the full Project Alder target-host
+attached model until a saved Ollama preference is available. Ollama endpoint
+and model preferences and hybrid retrieval settings are persisted inside the
+encrypted vault; llama-server API keys remain session-only. On 2026-09-15 the
+full Project Alder target-host
 scenario passed all three live Ollama checks through an explicit loopback
 endpoint, and the direct plaintext scanner found no markers in the
 application-data or cache roots outside the mounted vault. The live check used

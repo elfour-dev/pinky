@@ -9,6 +9,7 @@ use rand::RngCore;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{process::Command, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -18,6 +19,7 @@ use zeroize::Zeroizing;
 use crate::{ProcessError, ProcessOutcome, ProcessSupervisor, Vault, VaultError};
 
 const COLLECTION: &str = "pinky_chunks_v1";
+const COLLECTION_PREFIX: &str = "pinky_chunks_v1_";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Error)]
@@ -140,6 +142,7 @@ pub struct QdrantClient {
     client: Client,
     base_url: String,
     api_key: Zeroizing<String>,
+    collection: String,
 }
 
 impl fmt::Debug for QdrantClient {
@@ -147,6 +150,7 @@ impl fmt::Debug for QdrantClient {
         formatter
             .debug_struct("QdrantClient")
             .field("base_url", &self.base_url)
+            .field("collection", &self.collection)
             .field("api_key", &"[redacted]")
             .finish()
     }
@@ -157,6 +161,7 @@ pub struct VectorPoint {
     pub id: Uuid,
     pub source_version_id: Uuid,
     pub vector: Vec<f32>,
+    pub embedding_identity: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -180,7 +185,22 @@ impl QdrantClient {
                 .build()?,
             base_url: format!("http://127.0.0.1:{port}"),
             api_key,
+            collection: COLLECTION.to_owned(),
         })
+    }
+
+    /// Return a client scoped to one embedding identity. Separate collections
+    /// prevent a model change with a different vector dimension from mixing
+    /// incompatible points with the existing index.
+    pub fn for_embedding(&self, embedding_identity: &str) -> Self {
+        let digest = Sha256::digest(embedding_identity.as_bytes());
+        let digest = hex::encode(digest);
+        Self {
+            client: self.client.clone(),
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            collection: format!("{COLLECTION_PREFIX}{}", &digest[..32]),
+        }
     }
 
     pub async fn health(&self) -> Result<(), QdrantError> {
@@ -202,7 +222,7 @@ impl QdrantClient {
         if dimension == 0 {
             return Err(QdrantError::InvalidDimension);
         }
-        let url = format!("{}/collections/{COLLECTION}", self.base_url);
+        let url = format!("{}/collections/{}", self.base_url, self.collection);
         let response = self.auth(self.client.get(&url)).send().await?;
         if response.status() == StatusCode::NOT_FOUND {
             self.request(self.client.put(url).json(&json!({
@@ -210,7 +230,7 @@ impl QdrantClient {
                 "hnsw_config": { "on_disk": true },
                 "quantization_config": { "scalar": { "type": "int8", "quantile": 0.99, "always_ram": false } },
                 "on_disk_payload": true,
-                "metadata": { "schema_version": 1 }
+                "metadata": { "schema_version": 1, "embedding_collection": self.collection }
             }))).await?;
             return Ok(());
         }
@@ -248,15 +268,18 @@ impl QdrantClient {
                 json!({
                     "id": point.id,
                     "vector": normalize(&point.vector),
-                    "payload": { "source_version_id": point.source_version_id }
+                    "payload": {
+                        "source_version_id": point.source_version_id,
+                        "embedding_identity": point.embedding_identity
+                    }
                 })
             })
             .collect::<Vec<_>>();
         self.request(
             self.client
                 .put(format!(
-                    "{}/collections/{COLLECTION}/points?wait=true",
-                    self.base_url
+                    "{}/collections/{}/points?wait=true",
+                    self.base_url, self.collection
                 ))
                 .json(&json!({ "points": points })),
         )
@@ -269,12 +292,52 @@ impl QdrantClient {
         vector: &[f32],
         limit: usize,
     ) -> Result<Vec<VectorMatch>, QdrantError> {
+        self.query_filtered(vector, limit, None).await
+    }
+
+    pub async fn query_for_embedding(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        embedding_identity: &str,
+    ) -> Result<Vec<VectorMatch>, QdrantError> {
+        self.query_filtered(vector, limit, Some(embedding_identity))
+            .await
+    }
+
+    async fn query_filtered(
+        &self,
+        vector: &[f32],
+        limit: usize,
+        embedding_identity: Option<&str>,
+    ) -> Result<Vec<VectorMatch>, QdrantError> {
         if vector.is_empty() {
             return Err(QdrantError::InvalidDimension);
         }
-        let value = self.request(self.client.post(format!("{}/collections/{COLLECTION}/points/query", self.base_url)).json(&json!({
-            "query": normalize(vector), "limit": limit, "with_payload": true, "with_vector": false
-        }))).await?;
+        let mut body = json!({
+            "query": normalize(vector),
+            "limit": limit,
+            "with_payload": true,
+            "with_vector": false
+        });
+        if let Some(identity) = embedding_identity {
+            body["filter"] = json!({
+                "must": [{
+                    "key": "embedding_identity",
+                    "match": { "value": identity }
+                }]
+            });
+        }
+        let value = self
+            .request(
+                self.client
+                    .post(format!(
+                        "{}/collections/{}/points/query",
+                        self.base_url, self.collection
+                    ))
+                    .json(&body),
+            )
+            .await?;
         value
             .pointer("/result/points")
             .and_then(serde_json::Value::as_array)
@@ -491,5 +554,17 @@ mod tests {
             .unwrap();
         assert_eq!(request.headers().get("api-key").unwrap(), key.as_str());
         assert_eq!(request.url().host_str(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn embedding_clients_use_stable_isolated_collection_names() {
+        let client = QdrantClient::loopback(41001, Zeroizing::new("token".to_owned())).unwrap();
+        let first = client.for_embedding("ollama:nomic-embed-text");
+        let same = client.for_embedding("ollama:nomic-embed-text");
+        let other = client.for_embedding("ollama:other-embed-model");
+        assert_eq!(first.collection, same.collection);
+        assert_ne!(first.collection, other.collection);
+        assert!(first.collection.starts_with(COLLECTION_PREFIX));
+        assert_eq!(first.collection.len(), COLLECTION_PREFIX.len() + 32);
     }
 }

@@ -1,21 +1,24 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use pinky_core::{
     answer_question_with_history, create_registered_vault, read_registration,
-    unlock_registered_vault, AnswerEnvelopeV1, CitationPassage, ClaimSupportV1, ConversationDetail,
-    ConversationService, ConversationSummary, ConversationTurnV1, EmbeddingIndexer, GocryptfsMount,
-    HybridConfiguration, ImageOcrWorker, InferenceError, InferenceFuture, InferenceProvider,
-    LlamaClient, LlamaError, LocalFileFingerprint, LocalIngestor, LocalWatchTarget, MessageDraft,
-    ObjectStore, OllamaClient, OllamaError, OllamaRuntimeInfo, OnboardedVault, QaError,
+    unlock_registered_vault, AnswerEnvelopeV1, AssetListQuery, AssetListResponse, CitationPassage,
+    ClaimSupportV1, ConversationDetail, ConversationService, ConversationSummary,
+    ConversationTurnV1, EmbeddingIndexer, GocryptfsMount, HybridConfiguration, ImageOcrWorker,
+    InferenceError, InferenceFuture, InferenceProvider, LlamaClient, LlamaError,
+    LocalFileFingerprint, LocalIngestor, LocalWatchTarget, MessageDraft, ObjectStore, OllamaClient,
+    OllamaConfiguration, OllamaError, OllamaRuntimeInfo, OnboardedVault, PdfTextExtractor, QaError,
     QdrantLaunchConfig, QdrantSidecar, RetainedImage, RetrievalService, SearchHit, SourceSummary,
     StructuredGenerationRequest, SystemVaultPlatform, TaskContext, TaskJournal, TaskManager, Vault,
-    VaultPaths, VaultRegistration,
+    VaultPaths, VaultRegistration, AUTO_OCR_CONFIDENCE_THRESHOLDS,
+    AUTO_OCR_PAGE_SEGMENTATION_MODES, DEFAULT_OCR_MIN_CONFIDENCE,
+    DEFAULT_OCR_PAGE_SEGMENTATION_MODE,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
@@ -108,10 +111,12 @@ impl InferenceProvider for AttachedModelClient {
 
 #[derive(Clone)]
 struct AppRuntime {
+    // Drop the sidecar state before `data` releases the gocryptfs mount. This
+    // prevents Qdrant from keeping vault files busy during application exit.
+    hybrid_sidecar: Arc<tokio::sync::Mutex<HybridSidecarState>>,
     data: Arc<Mutex<RuntimeData>>,
     registration_path: Arc<PathBuf>,
     watcher: Arc<Mutex<Option<CancellationToken>>>,
-    hybrid_sidecar: Arc<tokio::sync::Mutex<HybridSidecarState>>,
 }
 
 impl AppRuntime {
@@ -121,6 +126,7 @@ impl AppRuntime {
         error: Option<String>,
     ) -> Self {
         Self {
+            hybrid_sidecar: Arc::new(tokio::sync::Mutex::new(HybridSidecarState::default())),
             data: Arc::new(Mutex::new(RuntimeData {
                 setup_in_progress: false,
                 registration,
@@ -133,7 +139,6 @@ impl AppRuntime {
             })),
             registration_path: Arc::new(registration_path),
             watcher: Arc::new(Mutex::new(None)),
-            hybrid_sidecar: Arc::new(tokio::sync::Mutex::new(HybridSidecarState::default())),
         }
     }
 }
@@ -157,6 +162,25 @@ struct OcrImageRequest {
     version_id: Uuid,
     executable: PathBuf,
     language: String,
+    #[serde(default)]
+    preprocessor: Option<PathBuf>,
+    #[serde(default)]
+    page_segmentation_mode: Option<u8>,
+    #[serde(default)]
+    auto_page_segmentation: bool,
+}
+
+#[derive(Deserialize)]
+struct DeleteImageOcrRequest {
+    source_id: Uuid,
+    version_id: Uuid,
+}
+
+#[derive(Deserialize)]
+struct DeleteImageOcrChunkRequest {
+    source_id: Uuid,
+    version_id: Uuid,
+    chunk_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -341,43 +365,86 @@ async fn attach_ollama(
     runtime: State<'_, AppRuntime>,
     tasks: State<'_, TaskManager>,
 ) -> Result<AttachLlamaResponse, String> {
-    let runtime = runtime.inner().clone();
-    begin_model_attach(&runtime)?;
+    attach_ollama_runtime(
+        request.endpoint,
+        request.model,
+        runtime.inner().clone(),
+        tasks.inner().clone(),
+    )
+    .await
+}
 
-    let endpoint = request.endpoint;
-    let model_name = request.model;
+async fn attach_ollama_runtime(
+    endpoint: String,
+    model_name: String,
+    runtime: AppRuntime,
+    tasks: TaskManager,
+) -> Result<AttachLlamaResponse, String> {
+    begin_model_attach(&runtime)?;
+    let persisted_endpoint = endpoint.clone();
+    let persisted_model = model_name.clone();
     let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
-    tasks
-        .inner()
-        .clone()
-        .spawn("model attach", None, move |context| async move {
-            context.progress(
-                "model attach",
-                None,
-                "Checking local Ollama model availability and context",
-            );
-            let result = async {
-                let client = OllamaClient::connect(&endpoint, &model_name)
-                    .map_err(|error| error.to_string())?;
-                let info = client
-                    .probe(&context.cancellation_token())
-                    .await
-                    .map_err(|error| match error {
-                        OllamaError::Cancelled => "cancelled".to_owned(),
-                        error => error.to_string(),
-                    })?;
-                Ok(ollama_attached_model(client, info))
-            }
-            .await;
-            let task_result = result.as_ref().map(|_| ()).map_err(Clone::clone);
-            let _ = result_sender.send(result);
-            task_result
-        });
+    tasks.spawn("model attach", None, move |context| async move {
+        context.progress(
+            "model attach",
+            None,
+            "Checking local Ollama model availability and context",
+        );
+        let result = async {
+            let client =
+                OllamaClient::connect(&endpoint, &model_name).map_err(|error| error.to_string())?;
+            let info = client
+                .probe(&context.cancellation_token())
+                .await
+                .map_err(|error| match error {
+                    OllamaError::Cancelled => "cancelled".to_owned(),
+                    error => error.to_string(),
+                })?;
+            Ok(ollama_attached_model(client, info))
+        }
+        .await;
+        let task_result = result.as_ref().map(|_| ()).map_err(Clone::clone);
+        let _ = result_sender.send(result);
+        task_result
+    });
 
     let result = result_receiver
         .await
         .map_err(|_| "model attach task ended without a result".to_owned())?;
-    finish_model_attach(&runtime, result)
+    let response = finish_model_attach(&runtime, result)?;
+    persist_ollama_configuration(&runtime, &persisted_endpoint, &persisted_model)?;
+    Ok(response)
+}
+
+fn persist_ollama_configuration(
+    runtime: &AppRuntime,
+    endpoint: &str,
+    model: &str,
+) -> Result<(), String> {
+    let database = {
+        let data = runtime
+            .data
+            .lock()
+            .map_err(|_| "runtime lock is poisoned".to_owned())?;
+        let session = data
+            .vault
+            .as_ref()
+            .ok_or_else(|| "unlock the encrypted vault before saving model settings".to_owned())?;
+        session
+            .vault
+            .ensure_mounted()
+            .map_err(|error| error.to_string())?;
+        session.database.clone()
+    };
+    let result = database
+        .lock()
+        .map_err(|_| "vault database lock is poisoned".to_owned())?
+        .set_ollama_configuration(&OllamaConfiguration {
+            endpoint: endpoint.to_owned(),
+            model: model.to_owned(),
+        })
+        .map_err(|error| error.to_string());
+    result
 }
 
 fn begin_model_attach(runtime: &AppRuntime) -> Result<(), String> {
@@ -457,8 +524,30 @@ fn ollama_attached_model(client: OllamaClient, info: OllamaRuntimeInfo) -> Attac
 
 #[tauri::command]
 fn detach_local_model(runtime: State<'_, AppRuntime>) -> Result<(), String> {
-    let mut data = runtime.data.lock().unwrap();
-    detach_model_state(&mut data)
+    {
+        let mut data = runtime.data.lock().unwrap();
+        detach_model_state(&mut data)?;
+    }
+    let database = {
+        let data = runtime
+            .data
+            .lock()
+            .map_err(|_| "runtime lock is poisoned".to_owned())?;
+        let Some(session) = data.vault.as_ref() else {
+            return Ok(());
+        };
+        session
+            .vault
+            .ensure_mounted()
+            .map_err(|error| error.to_string())?;
+        session.database.clone()
+    };
+    let result = database
+        .lock()
+        .map_err(|_| "vault database lock is poisoned".to_owned())?
+        .clear_ollama_configuration()
+        .map_err(|error| error.to_string());
+    result
 }
 
 fn detach_model_state(data: &mut RuntimeData) -> Result<(), String> {
@@ -676,10 +765,28 @@ async fn unlock_runtime(runtime: AppRuntime, tasks: TaskManager) -> Result<(), S
     };
     match result {
         Ok(vault) => {
+            let persisted_model = vault
+                .database
+                .lock()
+                .ok()
+                .and_then(|database| database.ollama_configuration().ok().flatten());
             data.vault = Some(vault);
             data.unlock_error = None;
             drop(data);
             start_local_watcher(runtime.clone(), tasks.clone());
+            if let Some(configuration) = persisted_model {
+                let runtime_for_attach = runtime.clone();
+                let tasks_for_attach = tasks.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = attach_ollama_runtime(
+                        configuration.endpoint,
+                        configuration.model,
+                        runtime_for_attach,
+                        tasks_for_attach,
+                    )
+                    .await;
+                });
+            }
             Ok(())
         }
         Err(error) => {
@@ -730,10 +837,60 @@ fn local_ingestor(runtime: &AppRuntime) -> Result<LocalIngestor, String> {
         .vault
         .ensure_mounted()
         .map_err(|error| error.to_string())?;
-    Ok(LocalIngestor::new(
+    let ingestor = LocalIngestor::new(
         vault.database.clone(),
         ObjectStore::new(vault.vault.clone()),
-    ))
+    );
+    let Some(executable) = discover_pdf_text_executable() else {
+        return Ok(ingestor);
+    };
+    let Ok(mut extractor) = PdfTextExtractor::new(executable) else {
+        return Ok(ingestor);
+    };
+    if let Some(renderer) = discover_pdf_renderer_executable() {
+        if let Ok(configured) = extractor.clone().with_renderer(renderer) {
+            extractor = configured;
+        }
+    }
+    if let Some(tesseract) = discover_tesseract_executable() {
+        if let Ok(worker) = ImageOcrWorker::new(tesseract, "eng") {
+            extractor = extractor.with_page_ocr(worker);
+        }
+    }
+    Ok(ingestor.with_pdf_extractor(extractor))
+}
+
+fn discover_pdf_text_executable() -> Option<PathBuf> {
+    let candidates = [
+        env::var_os("PINKY_PDFTOTEXT_EXECUTABLE").map(PathBuf::from),
+        Some(PathBuf::from("/usr/bin/pdftotext")),
+        Some(PathBuf::from("/bin/pdftotext")),
+    ];
+    candidates.into_iter().flatten().find(|path| {
+        path.is_absolute() && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+    })
+}
+
+fn discover_pdf_renderer_executable() -> Option<PathBuf> {
+    let candidates = [
+        env::var_os("PINKY_PDFTOPPM_EXECUTABLE").map(PathBuf::from),
+        Some(PathBuf::from("/usr/bin/pdftoppm")),
+        Some(PathBuf::from("/bin/pdftoppm")),
+    ];
+    candidates.into_iter().flatten().find(|path| {
+        path.is_absolute() && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+    })
+}
+
+fn discover_tesseract_executable() -> Option<PathBuf> {
+    let candidates = [
+        env::var_os("PINKY_TESSERACT_EXECUTABLE").map(PathBuf::from),
+        Some(PathBuf::from("/usr/bin/tesseract")),
+        Some(PathBuf::from("/bin/tesseract")),
+    ];
+    candidates.into_iter().flatten().find(|path| {
+        path.is_absolute() && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+    })
 }
 
 fn retrieval_service(runtime: &AppRuntime) -> Result<RetrievalService, String> {
@@ -1015,6 +1172,7 @@ async fn retrieve_hits(
         .probe_embedding(cancellation)
         .await
         .map_err(|error| error.to_string())?;
+    let embedding_identity = format!("ollama:{}", config.embedding_model);
     if cancellation.is_cancelled() {
         return Err("cancelled".to_owned());
     }
@@ -1037,7 +1195,7 @@ async fn retrieve_hits(
             None
         };
         if let Some(existing) = reusable {
-            let client = existing.client.clone();
+            let client = existing.client.for_embedding(&embedding_identity);
             state.sidecar = Some(existing);
             state.last_used = Some(Instant::now());
             client
@@ -1047,7 +1205,7 @@ async fn retrieve_hits(
             let started = QdrantSidecar::start(launch)
                 .await
                 .map_err(|error| error.to_string())?;
-            let client = started.client.clone();
+            let client = started.client.for_embedding(&embedding_identity);
             state.sidecar = Some(started);
             state.last_used = Some(Instant::now());
             client
@@ -1061,7 +1219,13 @@ async fn retrieve_hits(
         );
     }
     let indexer = EmbeddingIndexer::default();
-    let index_future = indexer.index_current_chunks(&embedding, &qdrant, &retrieval, cancellation);
+    let index_future = indexer.index_current_chunks_with_identity(
+        &embedding,
+        &qdrant,
+        &retrieval,
+        &embedding_identity,
+        cancellation,
+    );
     tokio::pin!(index_future);
     let index_started = Instant::now();
     let mut index_heartbeat = tokio::time::interval(Duration::from_secs(2));
@@ -1083,20 +1247,26 @@ async fn retrieve_hits(
     }
     .map_err(|error| error.to_string());
     let result = match indexed {
-        Ok(0) => Ok(Vec::new()),
         Ok(indexed) => {
             if let Some(context) = &progress {
                 context.progress(
                     "hybrid retrieval",
                     Some(0.8),
-                    format!(
-                        "Searching lexical and vector evidence across {indexed} indexed passage{}",
-                        if indexed == 1 { "" } else { "s" }
-                    ),
+                    if indexed == 0 {
+                        "Using the existing local vector index"
+                    } else {
+                        "Searching lexical and vector evidence after indexing new passages"
+                    },
                 );
             }
-            let search_future =
-                retrieval.search_hybrid(&query, limit, &embedding, &qdrant, cancellation);
+            let search_future = retrieval.search_hybrid_with_identity(
+                &query,
+                limit,
+                &embedding,
+                &qdrant,
+                Some(&embedding_identity),
+                cancellation,
+            );
             tokio::pin!(search_future);
             let search_started = Instant::now();
             let mut search_heartbeat = tokio::time::interval(Duration::from_secs(2));
@@ -1177,6 +1347,18 @@ impl Drop for WatchCompletion {
     }
 }
 
+struct DiscoveryCompletion {
+    source_path: PathBuf,
+    succeeded: bool,
+    sender: tokio::sync::mpsc::UnboundedSender<(PathBuf, bool)>,
+}
+
+impl Drop for DiscoveryCompletion {
+    fn drop(&mut self) {
+        let _ = self.sender.send((self.source_path.clone(), self.succeeded));
+    }
+}
+
 fn stable_change_ready(
     pending: &mut HashMap<Uuid, PendingObservation>,
     source_id: Uuid,
@@ -1200,6 +1382,52 @@ fn stable_change_ready(
     observation.confirmations = observation.confirmations.saturating_add(1);
     observation.confirmations >= 2
         && now.duration_since(observation.first_seen) >= Duration::from_millis(750)
+}
+
+fn stable_discovery_ready(
+    pending: &mut HashMap<PathBuf, PendingObservation>,
+    source_path: &Path,
+    fingerprint: LocalFileFingerprint,
+    now: Instant,
+) -> bool {
+    let observation = pending
+        .entry(source_path.to_owned())
+        .or_insert_with(|| PendingObservation {
+            fingerprint: fingerprint.clone(),
+            first_seen: now,
+            confirmations: 0,
+        });
+    if observation.fingerprint != fingerprint {
+        *observation = PendingObservation {
+            fingerprint,
+            first_seen: now,
+            confirmations: 0,
+        };
+    }
+    observation.confirmations = observation.confirmations.saturating_add(1);
+    observation.confirmations >= 2
+        && now.duration_since(observation.first_seen) >= Duration::from_millis(750)
+}
+
+fn discover_approved_files(root: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut directories = vec![root.to_owned()];
+    let mut files = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                directories.push(path);
+            } else if metadata.is_file() {
+                files.push(fs::canonicalize(path)?);
+            }
+        }
+    }
+    Ok(files)
 }
 
 fn start_local_watcher(runtime: AppRuntime, tasks: TaskManager) {
@@ -1232,6 +1460,11 @@ async fn run_local_watcher(
     let mut in_flight = HashSet::<Uuid>::new();
     let mut cooldown = HashMap::<Uuid, Instant>::new();
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel::<(Uuid, bool)>();
+    let mut discovery_pending = HashMap::<PathBuf, PendingObservation>::new();
+    let mut discovery_in_flight = HashSet::<PathBuf>::new();
+    let mut discovery_cooldown = HashMap::<PathBuf, Instant>::new();
+    let (discovery_done_tx, mut discovery_done_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(PathBuf, bool)>();
 
     loop {
         tokio::select! {
@@ -1244,6 +1477,14 @@ async fn run_local_watcher(
                 cooldown.remove(&source_id);
             } else {
                 cooldown.insert(source_id, Instant::now());
+            }
+        }
+        while let Ok((source_path, succeeded)) = discovery_done_rx.try_recv() {
+            discovery_in_flight.remove(&source_path);
+            if succeeded {
+                discovery_cooldown.remove(&source_path);
+            } else {
+                discovery_cooldown.insert(source_path, Instant::now());
             }
         }
 
@@ -1269,8 +1510,21 @@ async fn run_local_watcher(
             .iter()
             .map(|target| target.source_id)
             .collect::<HashSet<_>>();
+        let known_paths = targets
+            .iter()
+            .filter_map(|target| fs::canonicalize(&target.source_path).ok())
+            .collect::<HashSet<_>>();
+        let approved_roots = targets
+            .iter()
+            .map(|target| target.approved_root.clone())
+            .collect::<HashSet<_>>();
         pending.retain(|source_id, _| known.contains(source_id));
         cooldown.retain(|source_id, _| known.contains(source_id));
+        discovery_pending
+            .retain(|path, _| approved_roots.iter().any(|root| path.starts_with(root)));
+        discovery_in_flight.retain(|path| approved_roots.iter().any(|root| path.starts_with(root)));
+        discovery_cooldown
+            .retain(|path, _| approved_roots.iter().any(|root| path.starts_with(root)));
 
         for target in targets {
             if in_flight.contains(&target.source_id)
@@ -1318,6 +1572,50 @@ async fn run_local_watcher(
                 Ok(_) => {
                     pending.remove(&target.source_id);
                     cooldown.remove(&target.source_id);
+                }
+            }
+        }
+
+        for approved_root in approved_roots {
+            let files = match discover_approved_files(&approved_root) {
+                Ok(files) => files,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    runtime.data.lock().unwrap().watcher_error = Some(format!(
+                        "cannot scan approved root {}: {error}",
+                        approved_root.display()
+                    ));
+                    continue;
+                }
+            };
+            for source_path in files {
+                if known_paths.contains(&source_path)
+                    || discovery_in_flight.contains(&source_path)
+                    || discovery_cooldown
+                        .get(&source_path)
+                        .is_some_and(|last| last.elapsed() < Duration::from_secs(30))
+                {
+                    discovery_pending.remove(&source_path);
+                    continue;
+                }
+                let Ok(fingerprint) = LocalFileFingerprint::read(&source_path) else {
+                    continue;
+                };
+                if stable_discovery_ready(
+                    &mut discovery_pending,
+                    &source_path,
+                    fingerprint,
+                    Instant::now(),
+                ) {
+                    discovery_pending.remove(&source_path);
+                    discovery_in_flight.insert(source_path.clone());
+                    spawn_discovered_ingestion_task(
+                        &tasks,
+                        ingestor.clone(),
+                        approved_root.clone(),
+                        source_path,
+                        discovery_done_tx.clone(),
+                    );
                 }
             }
         }
@@ -1399,6 +1697,52 @@ fn spawn_missing_source_task(
     });
 }
 
+fn spawn_discovered_ingestion_task(
+    tasks: &TaskManager,
+    ingestor: LocalIngestor,
+    approved_root: PathBuf,
+    source_path: PathBuf,
+    done: tokio::sync::mpsc::UnboundedSender<(PathBuf, bool)>,
+) {
+    tasks.spawn("local ingestion", None, move |mut context| async move {
+        let mut completion = DiscoveryCompletion {
+            source_path: source_path.clone(),
+            succeeded: false,
+            sender: done,
+        };
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "local ingestion",
+            Some(0.1),
+            format!(
+                "Archiving newly discovered source {}",
+                source_path.display()
+            ),
+        );
+        let cancellation = context.cancellation_token();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            ingestor.ingest_cancellable(approved_root, source_path, cancellation)
+        })
+        .await
+        .map_err(|error| format!("ingestion worker failed: {error}"))?
+        .map_err(|error| error.to_string());
+        completion.succeeded = result.is_ok();
+        let result = result?;
+        context.progress(
+            "local ingestion",
+            Some(0.95),
+            format!(
+                "Retained discovered source in {} chunks",
+                result.chunk_count
+            ),
+        );
+        Ok(())
+    });
+}
+
 #[tauri::command]
 async fn ingest_local_file(
     request: IngestLocalFileRequest,
@@ -1449,38 +1793,115 @@ async fn ocr_image(
     tasks: State<'_, TaskManager>,
 ) -> Result<String, String> {
     let ingestor = local_ingestor(runtime.inner())?;
-    let worker = ImageOcrWorker::new(&request.executable, &request.language)
-        .map_err(|error| error.to_string())?;
+    let attempts = ocr_search_plan(
+        request.auto_page_segmentation,
+        request.page_segmentation_mode,
+    );
+    let workers = attempts
+        .into_iter()
+        .map(|(mode, confidence)| {
+            ImageOcrWorker::with_page_segmentation_mode_and_preprocessor(
+                &request.executable,
+                &request.language,
+                mode,
+                request.preprocessor.as_deref(),
+            )
+            .and_then(|worker| worker.with_confidence_threshold(confidence))
+            .map(|worker| (mode, confidence, worker))
+            .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let task_id = tasks.spawn("image OCR", None, move |mut context| async move {
         context
             .checkpoint()
             .await
             .map_err(|_| "cancelled".to_owned())?;
-        context.progress(
-            "image OCR",
-            Some(0.1),
-            "Running the supervised OCR worker inside the encrypted vault boundary",
-        );
         let cancellation = context.cancellation_token();
-        let chunks = ingestor
-            .ocr_current_image(
-                request.source_id,
-                request.version_id,
-                &worker,
-                &cancellation,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        let total_attempts = workers.len();
+        let mut last_error = None;
+        for (index, (mode, confidence, worker)) in workers.iter().enumerate() {
+            context
+                .checkpoint()
+                .await
+                .map_err(|_| "cancelled".to_owned())?;
+            let progress = 0.1 + (index as f32 / total_attempts as f32) * 0.8;
+            context.progress(
+                "image OCR",
+                Some(progress),
+                format!(
+                    "Trying Tesseract page segmentation mode {mode} at {confidence:.0}% minimum confidence ({}/{total_attempts})",
+                    index + 1
+                ),
+            );
+            match ingestor
+                .ocr_current_image(
+                    request.source_id,
+                    request.version_id,
+                    worker,
+                    &cancellation,
+                )
+                .await
+            {
+                Ok(chunks) => {
+                    context.progress(
+                        "image OCR",
+                        Some(0.95),
+                        format!(
+                            "Detected {chunks} OCR text chunk{} with page segmentation mode {mode} at {confidence:.0}% minimum confidence",
+                            if chunks == 1 { "" } else { "s" }
+                        ),
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    if cancellation.is_cancelled() {
+                        return Err("cancelled".to_owned());
+                    }
+                    last_error = Some(error.to_string());
+                }
+            }
+        }
+        let last_error = last_error.unwrap_or_else(|| "OCR returned no text".to_owned());
+        if request.auto_page_segmentation {
+            Err(format!(
+                "automatic OCR exhausted {total_attempts} page-segmentation/confidence combinations; last result: {last_error}"
+            ))
+        } else {
+            Err(last_error)
+        }
+    });
+    Ok(task_id.to_string())
+}
+
+#[tauri::command]
+async fn delete_image_ocr(
+    request: DeleteImageOcrRequest,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<String, String> {
+    let ingestor = local_ingestor(runtime.inner())?;
+    let task_id = tasks.spawn("delete image OCR", None, move |mut context| async move {
         context
             .checkpoint()
             .await
             .map_err(|_| "cancelled".to_owned())?;
         context.progress(
-            "image OCR",
+            "delete image OCR",
+            Some(0.1),
+            "Removing retained OCR text while keeping image metadata and pixels",
+        );
+        let removed = tauri::async_runtime::spawn_blocking(move || {
+            ingestor.delete_ocr_current_image(request.source_id, request.version_id)
+        })
+        .await
+        .map_err(|error| format!("OCR deletion worker failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        context.progress(
+            "delete image OCR",
             Some(0.95),
             format!(
-                "Attached {chunks} OCR text chunk{}",
-                if chunks == 1 { "" } else { "s" }
+                "Removed {removed} detected-text chunk{}; image metadata retained",
+                if removed == 1 { "" } else { "s" }
             ),
         );
         Ok(())
@@ -1489,9 +1910,74 @@ async fn ocr_image(
 }
 
 #[tauri::command]
+async fn delete_image_ocr_chunk(
+    request: DeleteImageOcrChunkRequest,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<String, String> {
+    let ingestor = local_ingestor(runtime.inner())?;
+    let task_id = tasks.spawn("delete OCR detection", None, move |mut context| async move {
+        context
+            .checkpoint()
+            .await
+            .map_err(|_| "cancelled".to_owned())?;
+        context.progress(
+            "delete OCR detection",
+            Some(0.1),
+            "Removing the selected detected-text chunk while keeping the image and other detections",
+        );
+        tauri::async_runtime::spawn_blocking(move || {
+            ingestor.delete_ocr_chunk_current_image(
+                request.source_id,
+                request.version_id,
+                request.chunk_id,
+            )
+        })
+        .await
+        .map_err(|error| format!("OCR detection deletion worker failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+        context.progress(
+            "delete OCR detection",
+            Some(0.95),
+            "Selected detected-text chunk removed; other detections remain",
+        );
+        Ok(())
+    });
+    Ok(task_id.to_string())
+}
+
+fn ocr_search_plan(auto: bool, selected: Option<u8>) -> Vec<(u8, f32)> {
+    if auto {
+        AUTO_OCR_CONFIDENCE_THRESHOLDS
+            .iter()
+            .flat_map(|confidence| {
+                AUTO_OCR_PAGE_SEGMENTATION_MODES
+                    .iter()
+                    .map(move |mode| (*mode, *confidence))
+            })
+            .collect()
+    } else {
+        vec![(
+            selected.unwrap_or(DEFAULT_OCR_PAGE_SEGMENTATION_MODE),
+            DEFAULT_OCR_MIN_CONFIDENCE,
+        )]
+    }
+}
+
+#[tauri::command]
 fn list_sources(runtime: State<'_, AppRuntime>) -> Result<Vec<SourceSummary>, String> {
     local_ingestor(runtime.inner())?
         .list_sources()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_assets(
+    query: AssetListQuery,
+    runtime: State<'_, AppRuntime>,
+) -> Result<AssetListResponse, String> {
+    local_ingestor(runtime.inner())?
+        .list_assets(query)
         .map_err(|error| error.to_string())
 }
 
@@ -1746,7 +2232,11 @@ async fn ask_question(
                     }
                 };
             }
-            let answer = qa_outcome.map_err(|error| error.to_string())?;
+            let answer = match qa_outcome {
+                Ok(answer) => answer,
+                Err(_error) if cancellation.is_cancelled() => return Err("cancelled".to_owned()),
+                Err(error) => return Err(error.to_string()),
+            };
             context.progress(
                 "cited answer",
                 Some(0.85),
@@ -1888,11 +2378,7 @@ fn persisted_answer_content(answer: &AnswerEnvelopeV1) -> String {
 fn retryable_answer_error(error: &QaError) -> bool {
     matches!(
         error,
-        QaError::Inference(
-            InferenceError::Unavailable(_)
-                | InferenceError::Timeout
-                | InferenceError::Rejected { .. }
-        )
+        QaError::Inference(InferenceError::Unavailable(_) | InferenceError::Rejected { .. })
     )
 }
 
@@ -2044,7 +2530,10 @@ pub fn run() {
             start_system_check,
             ingest_local_file,
             ocr_image,
+            delete_image_ocr,
+            delete_image_ocr_chunk,
             list_sources,
+            list_assets,
             get_hybrid_configuration,
             configure_hybrid_retrieval,
             clear_hybrid_configuration,
@@ -2091,6 +2580,21 @@ mod desktop_tests {
             "--expression-debug".to_owned(),
         ]));
         assert!(!expression_debug_enabled_from(["pinky-desktop".to_owned()]));
+    }
+
+    #[test]
+    fn automatic_ocr_exhausts_layout_and_confidence_combinations() {
+        let plan = ocr_search_plan(true, Some(7));
+        assert_eq!(
+            plan.len(),
+            AUTO_OCR_PAGE_SEGMENTATION_MODES.len() * AUTO_OCR_CONFIDENCE_THRESHOLDS.len()
+        );
+        assert_eq!(plan.first(), Some(&(0, 55.0)));
+        assert_eq!(plan.last(), Some(&(13, 25.0)));
+        assert_eq!(
+            ocr_search_plan(false, Some(7)),
+            vec![(7, DEFAULT_OCR_MIN_CONFIDENCE)]
+        );
     }
 
     #[test]
@@ -2243,6 +2747,56 @@ mod desktop_tests {
         watcher.await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_discovers_new_files_in_an_approved_root() {
+        let vault_root = tempfile::tempdir().unwrap();
+        let approved_root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(vault_root.path(), Mounted).unwrap();
+        let database = Arc::new(Mutex::new(
+            Database::open(&vault, Zeroizing::new(vec![0x38; 32])).unwrap(),
+        ));
+        let ingestor = LocalIngestor::new(database, ObjectStore::new(vault));
+        let existing = approved_root.path().join("existing.txt");
+        fs::write(&existing, "existing retained source").unwrap();
+        ingestor.ingest(approved_root.path(), &existing).unwrap();
+
+        let runtime = AppRuntime::new(vault_root.path().join("registration.json"), None, None);
+        let tasks = TaskManager::new();
+        let cancellation = CancellationToken::new();
+        let watcher = tokio::spawn(run_local_watcher(
+            runtime,
+            tasks,
+            ingestor.clone(),
+            cancellation.clone(),
+        ));
+
+        let discovered = approved_root.path().join("added-later.md");
+        fs::write(&discovered, "a source added after approval").unwrap();
+        let summaries = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let summaries = ingestor.list_sources().unwrap();
+                if summaries
+                    .iter()
+                    .any(|summary| summary.display_name == "added-later.md")
+                {
+                    break summaries;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let added = summaries
+            .iter()
+            .find(|summary| summary.display_name == "added-later.md")
+            .unwrap();
+        assert_eq!(added.state, "active");
+        assert_eq!(added.chunk_count, 1);
+
+        cancellation.cancel();
+        watcher.await.unwrap();
+    }
+
     fn attached_test_model() -> AttachedModel {
         AttachedModel {
             client: AttachedModelClient::Ollama(
@@ -2319,13 +2873,13 @@ mod desktop_tests {
             InferenceError::Unavailable("tunnel closed".into()),
         )));
         assert!(retryable_answer_error(&QaError::Inference(
-            InferenceError::Timeout,
-        )));
-        assert!(retryable_answer_error(&QaError::Inference(
             InferenceError::Rejected {
                 status: 503,
                 body: "busy".into(),
             },
+        )));
+        assert!(!retryable_answer_error(&QaError::Inference(
+            InferenceError::Timeout,
         )));
         assert!(!retryable_answer_error(&QaError::RepairFailed(
             "invalid answer"

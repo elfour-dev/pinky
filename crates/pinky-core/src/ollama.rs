@@ -15,7 +15,8 @@ use crate::{
 };
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const INFERENCE_TIMEOUT: Duration = Duration::from_secs(300);
+const INFERENCE_TIMEOUT: Duration = Duration::from_secs(120);
+const CHAT_CONTEXT_TOKENS: u32 = 8_192;
 const MAX_ERROR_BODY_CHARS: usize = 500;
 const KEEP_ALIVE: &str = "5m";
 
@@ -263,6 +264,10 @@ impl OllamaClient {
         cancellation: &CancellationToken,
     ) -> Result<InferenceResponse, InferenceError> {
         request.validate()?;
+        // Send the exact answer schema now that the request context is
+        // bounded. This lets Ollama enforce required fields and enums rather
+        // than relying on a model-specific interpretation of a compact shape;
+        // Pinky still validates the decoded answer and every citation.
         let body = serde_json::to_vec(&ChatRequest {
             model: &self.model_name,
             messages: [
@@ -281,6 +286,7 @@ impl OllamaClient {
             keep_alive: KEEP_ALIVE,
             options: ChatOptions {
                 temperature: 0.0,
+                num_ctx: CHAT_CONTEXT_TOKENS,
                 num_predict: request.max_output_tokens,
             },
         })
@@ -505,6 +511,7 @@ struct ChatMessageRequest<'a> {
 #[derive(Serialize)]
 struct ChatOptions {
     temperature: f32,
+    num_ctx: u32,
     num_predict: u32,
 }
 
@@ -922,6 +929,7 @@ mod tests {
             assert_eq!(body["think"], false);
             assert_eq!(body["keep_alive"], "5m");
             assert_eq!(body["options"]["temperature"], 0.0);
+            assert_eq!(body["options"]["num_ctx"], 8_192);
             assert_eq!(body["options"]["num_predict"], 512);
             assert_eq!(body["messages"][0]["role"], "system");
             assert_eq!(body["messages"][1]["role"], "user");

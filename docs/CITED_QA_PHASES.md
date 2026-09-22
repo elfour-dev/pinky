@@ -42,7 +42,8 @@ phase passes.
 - The model receives only the question, selected evidence, bounded conversation
   context, and required output schema.
 - Pinky generates citation identifiers. The model may select supplied IDs but
-  may not invent or rewrite them.
+  may not invent or rewrite them. The model-facing contract now uses only
+  zero-based evidence indexes; Rust materializes the final citation IDs.
 - Every displayed factual claim has validated citations or is explicitly
   labelled as inference, disputed, or unresolved.
 - Insufficient evidence produces a gap response, never a general-knowledge
@@ -167,7 +168,16 @@ claims map to evidence supplied for that exact request.
 
 ### Versioned answer
 
-`AnswerEnvelopeV1` contains only:
+`ModelAnswerV1` is the model-facing response and contains only:
+
+- `summary`: a concise direct response;
+- `summary_evidence`: zero-based indexes into the supplied evidence;
+- `claims`: ordered `statement`, `support`, and evidence-index objects;
+- `warnings`: stale, disputed, or single-source qualifications; and
+- `unresolved_gaps`: matters the supplied evidence could not answer.
+
+Rust materializes the validated model response as `AnswerEnvelopeV1`, whose
+public fields contain retained citation URIs:
 
 - `summary`: a concise direct response;
 - `summary_citations`: supplied evidence IDs supporting the direct response;
@@ -184,10 +194,13 @@ citations, and unbounded strings or arrays are rejected.
 
 - [x] Retrieve only current versions through the existing lexical index
 - [x] Deduplicate chunks and cap each source version at three chunks
-- [x] Select at most 12 chunks and 8,000 approximate context tokens
+- [x] Select at most 12 chunks and 1,500 approximate context tokens for the
+  current Ollama budget
 - [x] Preserve contradictory passages
 - [x] Delimit evidence as untrusted quoted material
-- [x] Supply only Pinky-generated citation IDs
+- [x] Keep citation materialization in Rust; the model receives no citation URIs
+- [x] Use request-local evidence indexes in the model contract and materialize
+  citation URIs outside the model
 - [x] Validate output independently of Ollama's schema enforcement
 - [x] Permit at most one bounded repair request
 - [x] Return an evidence gap without inference when retrieval is empty
@@ -349,9 +362,16 @@ gates remain.
 - [x] Add a strict signed artifact manifest verifier with HTTPS, metadata,
   Ed25519, size, digest, redirect rejection, streamed download, and
   atomic-install checks.
+- [x] Make retained-chunk embedding backfill incremental and restart-safe by
+  recording the embedding identity only after each successful Qdrant batch.
+- [x] Isolate Qdrant collections by embedding identity and filter vector
+  results to the active identity, preventing model changes from mixing points.
 - [x] Add a bounded deterministic reranker over the best 30 fused candidates,
   cap results at 12 citations, and cover relevance/bounding behavior with
   fixtures.
+- [x] Fail closed when reranked vector neighbours have no meaningful query
+  coverage, returning an explicit evidence gap instead of sending unrelated
+  passages to cited answer generation.
 - [x] Add a warm reranker p95 smoke test; the target-host one-million-chunk
   retrieval benchmark remains a release acceptance gate.
 - [ ] Install and verify signed embedding/Qdrant artifacts on the target host,
@@ -362,9 +382,7 @@ gates remain.
 Status: complete for the retained local-image path. Image metadata ingestion,
 bounded supervised OCR attachment, explicit retained-image viewing, worker
 cancellation, and restart-safe searchable retention are implemented and
-verified. PDF and Office extraction remain deliberately deferred.
-PDF and Office extraction are explicitly deferred until this phase and its
-acceptance gates pass.
+verified. PDF and Office extraction are separate later document milestones.
 
 Contract: approved image files remain encrypted, versioned, cancellable, and
 inspectable without leaking pixels, OCR text, or metadata outside the mounted
@@ -390,12 +408,66 @@ staging files are removed; the offline restart fixture reopens the vault and
 searches the attached OCR citation again; the oversized-output fixture proves
 the 8 MiB bound rejects and removes excessive OCR output.
 
+## R9 — PDF extraction
+
+Status: in progress. Bounded embedded-text extraction plus optional image-only
+page rendering/OCR and page-aware searchable chunks are implemented; the full
+PDF fixture gate remains.
+
+Contract: an approved PDF is retained byte-for-byte inside the encrypted vault,
+rendered or text-extracted in a bounded supervised worker, and exposed through
+page-aware searchable chunks whose citations reopen the retained PDF snapshot.
+Image-only pages may use the existing local OCR worker, but OCR text must remain
+linked to its page and retained PDF version.
+
+Planned gates:
+
+- [x] Retain the original PDF and extract embedded text through a supervised
+  Poppler worker with vault-only staging, output, timeout, and page limits.
+- [x] Preserve page numbers in searchable chunk coordinates and exact retained
+  PDF-version citations for embedded text.
+- [x] Detect pages without embedded text from the retained Poppler output and
+  render only those pages without re-downloading the source.
+- [x] Render pages inside vault-owned staging with page-count, image-byte,
+  pixel, and timeout limits; cleanup is verified by fixture tests.
+- [x] Preserve page coordinates and exact PDF-version citations for OCR text.
+- [x] Make extraction and page OCR cancellable and searchable through the
+  existing supervised worker boundary.
+- [x] Add malformed, encrypted, oversized-output, and mixed text/image PDF
+  fixtures, plus cancellation cleanup coverage.
+- [x] Enforce bounded object materialisation and Poppler/Tesseract memory and
+  output-file limits, with oversized-input and failed-replacement fixtures.
+- [x] Reopen retained PDF text and citations after a clean database/vault
+  restart.
+- [ ] Verify target-host acceptance for interrupted PDF work.
+
+## Final-stage document compatibility — Office extraction
+
+Status: deliberately deferred to a final product stage after the core assistant,
+research, workspace, generation, backup, and release work has stabilised.
+
+Contract: DOCX, XLSX, PPTX, and ODT files are extracted in isolated bounded
+workers while preserving document structure. Searchable chunks must retain
+document, sheet, slide, table, and heading coordinates so citations reopen the
+exact retained source version.
+
+Planned gates:
+
+- [ ] Implement separate extractors and fixtures for DOCX, XLSX, PPTX, and ODT.
+- [ ] Preserve headings, paragraphs, tables, sheets, slides, formulas, and
+  visible text without executing embedded content or macros.
+- [ ] Enforce archive-bomb, decompression, memory, timeout, and cancellation
+  limits.
+- [ ] Add exact structural citations, versioning, corruption handling, and
+  clean-machine acceptance tests.
+
 ## Parallel and deferred tracks
 
 These do not delay R2-R6 unless the user changes priority:
 
 - Supervised llama.cpp launch and model download onboarding
-- PDF and Office extraction (deferred until after R8 image support)
+- PDF extraction (the next document-ingestion phase)
+- Office extraction (final-stage document compatibility milestone)
 - Image generation (deferred until a later creative-tools phase)
 - Public-web research and freshness scheduling
 - Claims, contradictions, and dossiers beyond answer warnings
@@ -413,3 +485,8 @@ Implement one phase at a time:
 3. record every passed, failed, skipped, and unavailable gate honestly;
 4. update the acceptance ledger;
 5. stop for review or a separately requested commit before the next phase.
+
+The current phase gate permits work only on R7 and R9. R10 and later are
+blocked until both phases have all target-host checks recorded as passed in the
+ledger. Passing local unit or fixture tests does not waive an unavailable
+target-host gate.

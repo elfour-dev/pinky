@@ -583,6 +583,54 @@ fn unmount_path(path: &Path) -> Result<(), OnboardingError> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    // A force-terminated FUSE daemon can leave a disconnected endpoint in
+    // mountinfo while fusermount no longer has an mtab entry for it. Preserve
+    // the normal busy-mount failure, but allow the verified stale endpoint to
+    // be detached so the next unlock can mount the vault again.
+    if !mount_is_responsive(path) {
+        let stale_output = Command::new(program)
+            .args(["-uz", "--"])
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()?;
+        if stale_output.status.success() {
+            return Ok(());
+        }
+
+        let lazy_output = Command::new("umount")
+            .args(["-l", "--"])
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()?;
+        if lazy_output.status.success() {
+            return Ok(());
+        }
+
+        let original = String::from_utf8_lossy(&output.stderr);
+        let stale = String::from_utf8_lossy(&stale_output.stderr);
+        let lazy = String::from_utf8_lossy(&lazy_output.stderr);
+        return Err(OnboardingError::Platform {
+            operation: "stale vault cleanup",
+            message: format!(
+                "normal unmount: {}; FUSE lazy unmount: {}; system lazy unmount: {}",
+                original.trim(),
+                stale.trim(),
+                lazy.trim()
+            )
+            .chars()
+            .take(500)
+            .collect(),
+        });
+    }
+
     status_to_result(output, "vault unmount")
 }
 

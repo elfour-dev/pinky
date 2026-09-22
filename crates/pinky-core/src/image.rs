@@ -6,7 +6,8 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{self, Read, Write},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -21,8 +22,19 @@ use crate::{ObjectStore, ProcessError, ProcessSupervisor, VaultError};
 pub const IMAGE_METADATA_VERSION: &str = "pinky-image-metadata-v1";
 pub const MAX_IMAGE_METADATA_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_OCR_TEXT_BYTES: usize = 8 * 1024 * 1024;
+pub const OCR_WORKER_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const OCR_WORKER_FILE_BYTES: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_OCR_MIN_CONFIDENCE: f32 = 55.0;
 const OCR_LANGUAGE_MAX_BYTES: usize = 64;
 const OCR_TIMEOUT: Duration = Duration::from_secs(120);
+pub const DEFAULT_OCR_PAGE_SEGMENTATION_MODE: u8 = 3;
+/// Every Tesseract page segmentation mode is considered by automatic OCR. Some
+/// modes are specialised or unsupported by a particular Tesseract build; those
+/// attempts are recorded as failures and the bounded search continues.
+pub const AUTO_OCR_PAGE_SEGMENTATION_MODES: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+/// Automatic OCR lowers its acceptance threshold in bounded steps. It stops at
+/// the first non-empty result that meets one of these thresholds.
+pub const AUTO_OCR_CONFIDENCE_THRESHOLDS: &[f32] = &[55.0, 45.0, 35.0, 25.0];
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ImageMetadataError {
@@ -38,8 +50,12 @@ pub enum ImageMetadataError {
 pub enum ImageOcrError {
     #[error("OCR executable must be an absolute regular file: {0}")]
     InvalidExecutable(PathBuf),
+    #[error("OCR preprocessor must be an absolute regular file: {0}")]
+    InvalidPreprocessor(PathBuf),
     #[error("OCR language must be a short, non-empty identifier")]
     InvalidLanguage,
+    #[error("OCR page segmentation mode must be between 0 and 13")]
+    InvalidPageSegmentationMode,
     #[error("OCR only supports retained image MIME types")]
     UnsupportedMime,
     #[error("OCR image is too large for the metadata/OCR safety bound")]
@@ -56,6 +72,16 @@ pub enum ImageOcrError {
     Process(#[from] ProcessError),
     #[error("OCR worker exited unsuccessfully with code {0:?}")]
     Failed(Option<i32>),
+    #[error("OCR preprocessor exited unsuccessfully with code {0:?}")]
+    PreprocessorFailed(Option<i32>),
+    #[error("OCR preprocessor did not produce a safe regular image")]
+    InvalidPreprocessedImage,
+    #[error("OCR output confidence {score:.1}% is below the required {minimum:.1}%")]
+    LowConfidenceOutput { score: f32, minimum: f32 },
+    #[error("OCR confidence threshold must be finite and between 0 and 100")]
+    InvalidConfidenceThreshold,
+    #[error("OCR confidence output is not a regular file")]
+    InvalidConfidenceOutput,
     #[error("OCR output exceeded the {MAX_OCR_TEXT_BYTES}-byte limit")]
     OutputTooLarge,
     #[error("OCR output was not valid UTF-8")]
@@ -65,11 +91,36 @@ pub enum ImageOcrError {
 #[derive(Debug, Clone)]
 pub struct ImageOcrWorker {
     executable: PathBuf,
+    preprocessor: Option<PathBuf>,
     language: String,
+    page_segmentation_mode: u8,
+    minimum_confidence: f32,
 }
 
 impl ImageOcrWorker {
     pub fn new(executable: impl AsRef<Path>, language: &str) -> Result<Self, ImageOcrError> {
+        Self::with_page_segmentation_mode(executable, language, DEFAULT_OCR_PAGE_SEGMENTATION_MODE)
+    }
+
+    pub fn with_page_segmentation_mode(
+        executable: impl AsRef<Path>,
+        language: &str,
+        page_segmentation_mode: u8,
+    ) -> Result<Self, ImageOcrError> {
+        Self::with_page_segmentation_mode_and_preprocessor(
+            executable,
+            language,
+            page_segmentation_mode,
+            None,
+        )
+    }
+
+    pub fn with_page_segmentation_mode_and_preprocessor(
+        executable: impl AsRef<Path>,
+        language: &str,
+        page_segmentation_mode: u8,
+        preprocessor: Option<&Path>,
+    ) -> Result<Self, ImageOcrError> {
         let executable = executable.as_ref();
         if !executable.is_absolute()
             || !fs::symlink_metadata(executable).is_ok_and(|metadata| metadata.is_file())
@@ -85,10 +136,40 @@ impl ImageOcrWorker {
         {
             return Err(ImageOcrError::InvalidLanguage);
         }
+        if page_segmentation_mode > 13 {
+            return Err(ImageOcrError::InvalidPageSegmentationMode);
+        }
+        let preprocessor = preprocessor
+            .map(|path| {
+                if !path.is_absolute() {
+                    return Err(ImageOcrError::InvalidPreprocessor(path.to_owned()));
+                }
+                let canonical = fs::canonicalize(path)
+                    .map_err(|_| ImageOcrError::InvalidPreprocessor(path.to_owned()))?;
+                if !canonical.is_file() {
+                    return Err(ImageOcrError::InvalidPreprocessor(path.to_owned()));
+                }
+                Ok(canonical)
+            })
+            .transpose()?;
         Ok(Self {
             executable: fs::canonicalize(executable)?,
+            preprocessor,
             language: language.to_owned(),
+            page_segmentation_mode,
+            minimum_confidence: DEFAULT_OCR_MIN_CONFIDENCE,
         })
+    }
+
+    pub fn with_confidence_threshold(
+        mut self,
+        minimum_confidence: f32,
+    ) -> Result<Self, ImageOcrError> {
+        if !minimum_confidence.is_finite() || !(0.0..=100.0).contains(&minimum_confidence) {
+            return Err(ImageOcrError::InvalidConfidenceThreshold);
+        }
+        self.minimum_confidence = minimum_confidence;
+        Ok(self)
     }
 
     /// Run OCR against a retained image using a supervised process group.
@@ -131,20 +212,171 @@ impl ImageOcrWorker {
         let job = uuid::Uuid::new_v4().to_string();
         let extension = image_extension(mime_type).ok_or(ImageOcrError::UnsupportedMime)?;
         let input = staging.join(format!("{job}.{extension}"));
+        let processed = staging.join(format!("{job}.processed.png"));
         let output_base = staging.join(format!("{job}.result"));
         let output = output_base.with_extension("result.txt");
+        let confidence = output_base.with_extension("result.tsv");
         if let Err(error) = write_private_file(&input, &bytes) {
             let _ = fs::remove_file(&input);
             return Err(error.into());
         }
-        let result = self.run_process(&input, &output_base, cancellation).await;
-        let result = match result {
-            Ok(()) => read_ocr_output(&output),
-            Err(error) => Err(error),
-        };
+        let result = self
+            .recognize_path(
+                &input,
+                &processed,
+                &output_base,
+                &output,
+                &confidence,
+                cancellation,
+            )
+            .await;
+        let _ = fs::remove_file(&processed);
         let _ = fs::remove_file(&input);
         let _ = fs::remove_file(&output);
+        let _ = fs::remove_file(&confidence);
         result
+    }
+
+    /// Run OCR against a temporary rendered image already held inside the
+    /// mounted vault. This is used by the PDF worker so rendered page pixels
+    /// never need to become an unreferenced object-store entry.
+    pub async fn recognize_staged(
+        &self,
+        objects: &ObjectStore,
+        input: &Path,
+        mime_type: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<String, ImageOcrError> {
+        if !is_image_mime(mime_type) {
+            return Err(ImageOcrError::UnsupportedMime);
+        }
+        if cancellation.is_cancelled() {
+            return Err(ImageOcrError::Cancelled);
+        }
+        let vault = objects.vault();
+        vault.ensure_mounted()?;
+        let staging = vault.resolve_internal("staging/ocr");
+        if fs::symlink_metadata(&staging)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(ImageOcrError::Vault(VaultError::UnsafeLayout(staging)));
+        }
+        fs::create_dir_all(&staging)?;
+        if !fs::canonicalize(&staging)?.starts_with(vault.root()) {
+            return Err(ImageOcrError::Vault(VaultError::UnsafeLayout(staging)));
+        }
+        let input = fs::canonicalize(input).map_err(ImageOcrError::Io)?;
+        let metadata = fs::symlink_metadata(&input)?;
+        if !metadata.file_type().is_file()
+            || metadata.len() > MAX_IMAGE_METADATA_BYTES as u64
+            || !input.starts_with(vault.root())
+        {
+            return Err(ImageOcrError::InvalidPreprocessedImage);
+        }
+        let job = uuid::Uuid::new_v4().to_string();
+        let processed = staging.join(format!("{job}.processed.png"));
+        let output_base = staging.join(format!("{job}.result"));
+        let output = output_base.with_extension("result.txt");
+        let confidence = output_base.with_extension("result.tsv");
+        let result = self
+            .recognize_path(
+                &input,
+                &processed,
+                &output_base,
+                &output,
+                &confidence,
+                cancellation,
+            )
+            .await;
+        let _ = fs::remove_file(&processed);
+        let _ = fs::remove_file(&output);
+        let _ = fs::remove_file(&confidence);
+        result
+    }
+
+    async fn recognize_path(
+        &self,
+        input: &Path,
+        processed: &Path,
+        output_base: &Path,
+        output: &Path,
+        confidence: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<String, ImageOcrError> {
+        let recognition_input = if self.preprocessor.is_some() {
+            self.run_preprocessor(input, processed, cancellation)
+                .await?;
+            processed
+        } else {
+            input
+        };
+        self.run_process(recognition_input, output_base, cancellation)
+            .await?;
+        let text = read_ocr_output(output)?;
+        if let Some(score) = read_ocr_confidence(confidence)? {
+            if score < self.minimum_confidence {
+                return Err(ImageOcrError::LowConfidenceOutput {
+                    score,
+                    minimum: self.minimum_confidence,
+                });
+            }
+        }
+        Ok(text)
+    }
+
+    async fn run_preprocessor(
+        &self,
+        input: &Path,
+        output: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<(), ImageOcrError> {
+        let preprocessor = self
+            .preprocessor
+            .as_ref()
+            .expect("preprocessor is present when preprocessing is requested");
+        let mut command = Command::new(preprocessor);
+        command
+            .env_clear()
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .arg(input)
+            .arg("-auto-orient")
+            .arg("-deskew")
+            .arg("40%")
+            .arg("-colorspace")
+            .arg("Gray")
+            .arg("-resize")
+            .arg("200%")
+            .arg("-contrast-stretch")
+            .arg("0x10%")
+            .arg("-sharpen")
+            .arg("0x1")
+            .arg(output);
+        configure_ocr_worker_limits(&mut command);
+        let outcome = self.run_supervised(command, cancellation).await?;
+        if cancellation.is_cancelled()
+            || matches!(
+                outcome.termination,
+                crate::ProcessTermination::CancelledCooperatively
+                    | crate::ProcessTermination::Sigterm
+                    | crate::ProcessTermination::Sigkill
+            )
+        {
+            return Err(ImageOcrError::Cancelled);
+        }
+        if outcome.exit_code != Some(0) {
+            return Err(ImageOcrError::PreprocessorFailed(outcome.exit_code));
+        }
+        let metadata = fs::symlink_metadata(output)?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_IMAGE_METADATA_BYTES as u64 {
+            return Err(ImageOcrError::InvalidPreprocessedImage);
+        }
+        let canonical = fs::canonicalize(output)?;
+        if !canonical.starts_with(output.parent().expect("processed output has a parent")) {
+            return Err(ImageOcrError::InvalidPreprocessedImage);
+        }
+        Ok(())
     }
 
     async fn run_process(
@@ -161,15 +393,13 @@ impl ImageOcrWorker {
             .arg(input)
             .arg(output_base)
             .arg("--psm")
-            .arg("3")
+            .arg(self.page_segmentation_mode.to_string())
             .arg("-l")
-            .arg(&self.language);
-        let outcome = tokio::time::timeout(
-            OCR_TIMEOUT,
-            ProcessSupervisor::new().run(command, cancellation.clone()),
-        )
-        .await
-        .map_err(|_| ImageOcrError::Failed(None))??;
+            .arg(&self.language)
+            .arg("txt")
+            .arg("tsv");
+        configure_ocr_worker_limits(&mut command);
+        let outcome = self.run_supervised(command, cancellation).await?;
         if cancellation.is_cancelled()
             || matches!(
                 outcome.termination,
@@ -184,6 +414,42 @@ impl ImageOcrWorker {
             return Err(ImageOcrError::Failed(outcome.exit_code));
         }
         Ok(())
+    }
+
+    async fn run_supervised(
+        &self,
+        command: Command,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::ProcessOutcome, ImageOcrError> {
+        tokio::time::timeout(
+            OCR_TIMEOUT,
+            ProcessSupervisor::new().run(command, cancellation.clone()),
+        )
+        .await
+        .map_err(|_| ImageOcrError::Failed(None))?
+        .map_err(ImageOcrError::Process)
+    }
+}
+
+fn configure_ocr_worker_limits(command: &mut Command) {
+    unsafe {
+        command.as_std_mut().pre_exec(|| {
+            let memory = libc::rlimit {
+                rlim_cur: OCR_WORKER_MEMORY_BYTES as libc::rlim_t,
+                rlim_max: OCR_WORKER_MEMORY_BYTES as libc::rlim_t,
+            };
+            if libc::setrlimit(libc::RLIMIT_AS, &memory) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let file_size = libc::rlimit {
+                rlim_cur: OCR_WORKER_FILE_BYTES as libc::rlim_t,
+                rlim_max: OCR_WORKER_FILE_BYTES as libc::rlim_t,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &file_size) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
 }
 
@@ -222,6 +488,43 @@ fn read_ocr_output(path: &Path) -> Result<String, ImageOcrError> {
         .unwrap_or(&text)
         .replace("\r\n", "\n")
         .replace('\r', "\n"))
+}
+
+fn read_ocr_confidence(path: &Path) -> Result<Option<f32>, ImageOcrError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(ImageOcrError::InvalidConfidenceOutput);
+    }
+    let mut file = open_private_read(path)?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take((MAX_OCR_TEXT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_OCR_TEXT_BYTES {
+        return Err(ImageOcrError::OutputTooLarge);
+    }
+    let tsv = String::from_utf8(bytes).map_err(|_| ImageOcrError::InvalidUtf8)?;
+    let mut total = 0.0_f32;
+    let mut count = 0_u32;
+    for line in tsv.lines().skip(1) {
+        let mut fields = line.split('\t');
+        let fields = fields.by_ref().collect::<Vec<_>>();
+        if fields.len() < 12 || fields[11].trim().is_empty() {
+            continue;
+        }
+        let Ok(confidence) = fields[10].parse::<f32>() else {
+            continue;
+        };
+        if confidence >= 0.0 {
+            total += confidence;
+            count += 1;
+        }
+    }
+    Ok((count > 0).then_some(total / count as f32))
 }
 
 fn open_private_read(path: &Path) -> Result<File, std::io::Error> {
@@ -759,6 +1062,127 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn supervised_ocr_passes_the_selected_page_segmentation_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let vault_root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(vault_root.path(), Mounted).unwrap();
+        let objects = ObjectStore::new(vault);
+        let stored = objects.put(b"retained image bytes", "image/png").unwrap();
+        let executable = vault_root.path().join("fake-ocr-psm.sh");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' \"$4\" > \"$2.txt\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let worker = ImageOcrWorker::with_page_segmentation_mode(&executable, "eng", 11).unwrap();
+        let output = worker
+            .recognize(
+                &objects,
+                &stored.metadata.sha256,
+                "image/png",
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output, "11\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn confidence_thresholds_can_be_relaxed_for_automatic_ocr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let vault_root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(vault_root.path(), Mounted).unwrap();
+        let objects = ObjectStore::new(vault);
+        let stored = objects.put(b"retained image bytes", "image/png").unwrap();
+        let executable = vault_root.path().join("fake-ocr-confidence.sh");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'detected text\\n' > \"$2.txt\"\nprintf 'level\\tpage_num\\tblock_num\\tpar_num\\tline_num\\tword_num\\tleft\\ttop\\twidth\\theight\\tconf\\ttext\\n5\\t1\\t1\\t1\\t1\\t1\\t0\\t0\\t10\\t10\\t40\\tdetected\\n' > \"$2.tsv\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let worker = ImageOcrWorker::new(&executable, "eng").unwrap();
+        let strict = worker
+            .clone()
+            .recognize(
+                &objects,
+                &stored.metadata.sha256,
+                "image/png",
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(
+            strict,
+            Err(ImageOcrError::LowConfidenceOutput { score, minimum })
+                if (score - 40.0).abs() < f32::EPSILON
+                    && (minimum - DEFAULT_OCR_MIN_CONFIDENCE).abs() < f32::EPSILON
+        ));
+        let relaxed = worker
+            .with_confidence_threshold(35.0)
+            .unwrap()
+            .recognize(
+                &objects,
+                &stored.metadata.sha256,
+                "image/png",
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(relaxed, "detected text\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_ocr_can_preprocess_inside_the_vault() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let vault_root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(vault_root.path(), Mounted).unwrap();
+        let objects = ObjectStore::new(vault);
+        let stored = objects.put(b"retained image bytes", "image/png").unwrap();
+        let preprocessor = vault_root.path().join("fake-preprocessor.sh");
+        fs::write(
+            &preprocessor,
+            "#!/bin/sh\noutput=\"\"\nfor argument in \"$@\"; do output=\"$argument\"; done\ncp \"$1\" \"$output\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&preprocessor, fs::Permissions::from_mode(0o700)).unwrap();
+        let executable = vault_root.path().join("fake-ocr.sh");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'preprocessed OCR result\\n' > \"$2.txt\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let worker = ImageOcrWorker::with_page_segmentation_mode_and_preprocessor(
+            &executable,
+            "eng",
+            3,
+            Some(&preprocessor),
+        )
+        .unwrap();
+        let output = worker
+            .recognize(
+                &objects,
+                &stored.metadata.sha256,
+                "image/png",
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output, "preprocessed OCR result\n");
+        let staging = vault_root.path().join("staging/ocr");
+        assert!(fs::read_dir(&staging)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn cancellation_during_ocr_terminates_the_worker_and_cleans_staging() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -873,5 +1297,32 @@ mod tests {
             ImageOcrWorker::new(&executable, "en g"),
             Err(ImageOcrError::InvalidLanguage)
         ));
+        assert!(matches!(
+            ImageOcrWorker::with_page_segmentation_mode(&executable, "eng", 14),
+            Err(ImageOcrError::InvalidPageSegmentationMode)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_a_system_preprocessor_symlink_after_canonicalization() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("ocr");
+        let preprocessor_target = root.path().join("preprocessor-target");
+        let preprocessor_link = root.path().join("preprocessor-link");
+        fs::write(&executable, b"#!/bin/sh").unwrap();
+        fs::write(&preprocessor_target, b"#!/bin/sh").unwrap();
+        symlink(&preprocessor_target, &preprocessor_link).unwrap();
+        assert!(
+            ImageOcrWorker::with_page_segmentation_mode_and_preprocessor(
+                &executable,
+                "eng",
+                3,
+                Some(&preprocessor_link),
+            )
+            .is_ok()
+        );
     }
 }

@@ -42,8 +42,9 @@ This avoids making vector retrieval, public-web research, image generation,
 document extraction, and autonomous application generation prerequisites for
 the first useful assistant workflow. Image metadata, bounded local OCR,
 retained-pixel viewing, and image cancellation/restart acceptance are now
-available. Image generation remains separate follow-up work. PDF or Office
-extraction follows the prioritised image phase.
+available. Image generation remains separate follow-up work. PDF extraction
+follows the prioritised image phase; Office extraction remains a final-stage
+document-compatibility task.
 
 ## Offline development loop
 

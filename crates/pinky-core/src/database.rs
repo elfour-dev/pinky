@@ -6,9 +6,11 @@ use zeroize::Zeroizing;
 
 use crate::{Vault, VaultError};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 4;
 const MIGRATION_001: &str = include_str!("../migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("../migrations/002_hybrid_configuration.sql");
+const MIGRATION_003: &str = include_str!("../migrations/003_asset_indexes.sql");
+const MIGRATION_004: &str = include_str!("../migrations/004_ollama_configuration.sql");
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -37,6 +39,12 @@ pub struct HybridConfiguration {
     pub qdrant_executable: String,
     pub embedding_endpoint: String,
     pub embedding_model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OllamaConfiguration {
+    pub endpoint: String,
+    pub model: String,
 }
 
 impl Database {
@@ -70,8 +78,18 @@ impl Database {
         if is_new || version == 0 {
             connection.execute_batch(MIGRATION_001)?;
             connection.execute_batch(MIGRATION_002)?;
-        } else if version < SCHEMA_VERSION {
-            connection.execute_batch(MIGRATION_002)?;
+            connection.execute_batch(MIGRATION_003)?;
+            connection.execute_batch(MIGRATION_004)?;
+        } else {
+            if version < 2 {
+                connection.execute_batch(MIGRATION_002)?;
+            }
+            if version < 3 {
+                connection.execute_batch(MIGRATION_003)?;
+            }
+            if version < 4 {
+                connection.execute_batch(MIGRATION_004)?;
+            }
         }
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         sync_parent(&path)?;
@@ -129,6 +147,47 @@ impl Database {
             .execute("DELETE FROM hybrid_configuration WHERE id = 1", [])?;
         Ok(())
     }
+
+    pub fn ollama_configuration(&self) -> Result<Option<OllamaConfiguration>, DatabaseError> {
+        let result = self.connection.query_row(
+            "SELECT endpoint, model FROM ollama_configuration WHERE id = 1",
+            [],
+            |row| {
+                Ok(OllamaConfiguration {
+                    endpoint: row.get(0)?,
+                    model: row.get(1)?,
+                })
+            },
+        );
+        match result {
+            Ok(configuration) => Ok(Some(configuration)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(DatabaseError::Sql(error)),
+        }
+    }
+
+    pub fn set_ollama_configuration(
+        &self,
+        configuration: &OllamaConfiguration,
+    ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "INSERT INTO ollama_configuration
+                (id, endpoint, model, configured_at, updated_at)
+             VALUES (1, ?1, ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET
+                endpoint = excluded.endpoint,
+                model = excluded.model,
+                updated_at = CURRENT_TIMESTAMP",
+            rusqlite::params![configuration.endpoint, configuration.model],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_ollama_configuration(&self) -> Result<(), DatabaseError> {
+        self.connection
+            .execute("DELETE FROM ollama_configuration WHERE id = 1", [])?;
+        Ok(())
+    }
 }
 
 fn sync_parent(path: &Path) -> Result<(), std::io::Error> {
@@ -179,6 +238,15 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
         assert_eq!(source_table, "sources");
         assert_eq!(hybrid_table, "hybrid_configuration");
+        let ollama_table: String = database
+            .connection()
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'ollama_configuration'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ollama_table, "ollama_configuration");
         database
             .set_hybrid_configuration(&HybridConfiguration {
                 qdrant_executable: "/usr/bin/qdrant".into(),
@@ -196,6 +264,21 @@ mod tests {
         );
         database.clear_hybrid_configuration().unwrap();
         assert!(database.hybrid_configuration().unwrap().is_none());
+        database
+            .set_ollama_configuration(&OllamaConfiguration {
+                endpoint: "http://127.0.0.1:11435".into(),
+                model: "qwen3.5:4b".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            database.ollama_configuration().unwrap(),
+            Some(OllamaConfiguration {
+                endpoint: "http://127.0.0.1:11435".into(),
+                model: "qwen3.5:4b".into(),
+            })
+        );
+        database.clear_ollama_configuration().unwrap();
+        assert!(database.ollama_configuration().unwrap().is_none());
         drop(database);
 
         let raw = fs::read(vault.root().join("database/pinky.sqlite3")).unwrap();

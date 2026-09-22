@@ -70,6 +70,8 @@ pub enum ObjectStoreError {
     Io(#[from] std::io::Error),
     #[error("object metadata error: {0}")]
     Metadata(#[from] serde_json::Error),
+    #[error("object uncompressed length {length} exceeds the {maximum}-byte read limit")]
+    ReadLimitExceeded { length: u64, maximum: u64 },
 }
 
 #[derive(Debug, Clone)]
@@ -164,14 +166,66 @@ impl ObjectStore {
     }
 
     pub fn read_verified(&self, hash: &str) -> Result<Vec<u8>, ObjectStoreError> {
+        self.read_verified_limited_to(hash, None)
+    }
+
+    /// Read and checksum an object without allowing decompression to exceed a
+    /// caller-provided bound. The object metadata is checked before opening
+    /// the compressed payload, while the decoder also enforces the bound in
+    /// case the metadata sidecar is missing or stale.
+    pub fn read_verified_limited(
+        &self,
+        hash: &str,
+        maximum: usize,
+    ) -> Result<Vec<u8>, ObjectStoreError> {
+        self.read_verified_limited_to(hash, Some(maximum as u64))
+    }
+
+    fn read_verified_limited_to(
+        &self,
+        hash: &str,
+        maximum: Option<u64>,
+    ) -> Result<Vec<u8>, ObjectStoreError> {
         self.vault.ensure_mounted()?;
         validate_hash(hash)?;
-        let path = self
+        let directory = self
             .vault
-            .resolve_internal(format!("objects/{}/{}.zst", &hash[..2], hash));
-        let mut decoder = zstd::Decoder::new(File::open(path)?)?;
+            .resolve_internal(format!("objects/{}", &hash[..2]));
+        if let Some(maximum) = maximum {
+            let metadata_path = directory.join(format!("{hash}.meta.json"));
+            if let Ok(metadata) = fs::read(&metadata_path) {
+                let metadata: ObjectMetadata = serde_json::from_slice(&metadata)?;
+                if metadata.sha256 != hash {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "object metadata checksum mismatch",
+                    )
+                    .into());
+                }
+                if metadata.uncompressed_length > maximum {
+                    return Err(ObjectStoreError::ReadLimitExceeded {
+                        length: metadata.uncompressed_length,
+                        maximum,
+                    });
+                }
+            }
+        }
+        let path = directory.join(format!("{hash}.zst"));
+        let decoder = zstd::Decoder::new(File::open(path)?)?;
+        let mut decoder = match maximum {
+            Some(maximum) => decoder.take(maximum.saturating_add(1)),
+            None => decoder.take(u64::MAX),
+        };
         let mut bytes = Vec::new();
         decoder.read_to_end(&mut bytes)?;
+        if let Some(maximum) = maximum {
+            if bytes.len() as u64 > maximum {
+                return Err(ObjectStoreError::ReadLimitExceeded {
+                    length: bytes.len() as u64,
+                    maximum,
+                });
+            }
+        }
         if hex::encode(Sha256::digest(&bytes)) != hash {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -239,6 +293,27 @@ mod tests {
             b"retained evidence"
         );
         assert_eq!(first.metadata.compression_level, 6);
+    }
+
+    #[test]
+    fn bounded_reads_reject_before_decompressing_an_oversized_object() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = Vault::open_with(root.path(), Mounted).unwrap();
+        let store = ObjectStore::new(vault);
+        let object = store.put(b"0123456789", "application/pdf").unwrap();
+        assert!(matches!(
+            store.read_verified_limited(&object.metadata.sha256, 4),
+            Err(ObjectStoreError::ReadLimitExceeded {
+                length: 10,
+                maximum: 4
+            })
+        ));
+        assert_eq!(
+            store
+                .read_verified_limited(&object.metadata.sha256, 10)
+                .unwrap(),
+            b"0123456789"
+        );
     }
 
     struct Switch(Arc<AtomicBool>);

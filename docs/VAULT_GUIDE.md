@@ -3,8 +3,11 @@
 This guide covers the functionality available in the current development build:
 creating and unlocking an encrypted vault, retaining supported local files,
 searching their text, and opening exact citations. Conversational AI, generated
-answers, PDF and Office extraction, web research, and backup/restore are not yet
-available.
+answers, Office extraction, web research, and backup/restore are not yet
+available. PDF extraction uses the Poppler `pdftotext` runtime and, when
+`pdftoppm` plus Tesseract are installed, renders and OCRs pages for which no
+embedded text was found. The full malformed/encrypted/oversized PDF acceptance
+matrix remains in progress.
 
 For a practical walkthrough with ready-made Markdown, JSON, CSV, and log files,
 follow the [hands-on vault tutorial](VAULT_TUTORIAL.md).
@@ -155,6 +158,13 @@ The useful cause is usually the final message described above.
 5. Watch the ingestion task in the right-hand operations panel. The source
    appears in the left panel after the task completes.
 
+Once one file establishes an approved directory, Pinky watches that directory
+recursively. New regular files placed inside it are automatically discovered
+after they remain stable, archived as their own sources, and added to the list
+after the discovery task completes. You do not need to submit each later file
+manually. A directory must still have at least one initially retained file so
+Pinky has an explicit approved root to watch.
+
 The source file must resolve inside the approved directory. Pinky rejects
 directories, devices, sockets, and symlinks that escape the approved root.
 
@@ -200,26 +210,59 @@ Currently extractable formats are UTF-8 text, Markdown, logs, source code, JSON,
 YAML, XML, HTML, and CSV. PNG, JPEG, WebP, GIF, and TIFF files also retain
 searchable technical metadata such as dimensions, channels, alpha, animation,
 and orientation where available. Image rows expose a bounded local OCR action,
-and image citations can open the exact retained pixels. Other files are
-retained safely but marked `unsupported`; PDF and Office extraction are
-intentionally deferred until after image support, while web ingestion remains a
-later phase.
+and image citations can open the exact retained pixels. Embedded-text PDFs use
+the supervised Poppler worker and produce page-aware searchable citations when
+`pdftotext` is installed. Image-only pages are rendered and OCRed when
+`pdftoppm` and Tesseract are available; otherwise the retained PDF remains
+searchable only when it contains embedded text. Office extraction is reserved
+for a final-stage document-compatibility milestone. Web ingestion remains a
+separate later phase.
 
 ### Use image OCR
 
-Install a local OCR executable such as Tesseract yourself, then retain an image
-inside an approved root. In the Sources list, select **OCR** beside the image,
+The recommended development bootstrap installs Tesseract, ImageMagick, and
+the English language data automatically. If you used the manual setup, install
+them with `sudo apt install -y tesseract-ocr tesseract-ocr-eng imagemagick`.
+Then retain an image
+inside an approved root. In the Sources list, select **OCR** beside the image;
+the dialog defaults to **Try all layouts automatically**,
 enter the absolute executable path (for example `/usr/bin/tesseract`) and a
-short language code such as `eng`. Pinky runs the worker as a cancellable,
+short language code such as `eng`. Choose a page segmentation mode in the
+popup: use **3** for normal pages, **6** for a uniform text block, **7** for a
+single line, or **11** for scattered text. Pinky runs the worker as a cancellable,
 supervised task. Its temporary input and output stay under the mounted vault;
 the normalized result is encrypted, attached to that image version, and becomes
-searchable with ordinary source search. Re-running OCR for the same version is
-refused so a later edit creates a fresh source version instead.
+searchable with ordinary source search. OCR may be run again on the same image
+version—for example with a different page segmentation mode. Each run appends
+its own encrypted chunks, so earlier citation links remain valid; repeated runs
+may produce duplicate-looking search results when the recognition is unchanged.
+Choose **Try all layouts automatically** when a single mode finds no text. Pinky
+tries modes 3, 4, 6, 7, 8, 11, 12, and 13 sequentially and keeps every
+non-empty result. Automatic mode tests every Tesseract page-segmentation mode
+(0–13) at minimum confidence thresholds of 55%, 45%, 35%, and 25%, stopping at
+the first accepted result. It therefore makes at most 56 supervised attempts;
+if every combination fails, the task reports that the bounded search was
+exhausted. By default, the OCR dialog also enhances difficult images by
+auto-orienting, deskewing, converting to grayscale, upscaling 2×, stretching
+contrast, and sharpening with ImageMagick. This can take several minutes on a
+large or difficult image; disable enhancement only when the original pixels are
+already clean and level. Pinky also checks Tesseract's TSV confidence output and
+does not attach a low-confidence pass as searchable text; automatic mode moves
+on to the next layout instead.
 
 When a search result cites an image, open the citation and choose **View
 retained pixels** to display the exact archived bytes. This is an explicit
 second request so merely searching image metadata does not copy pixels through
 the desktop IPC path.
+
+If the detected text is incorrect or no longer wanted, open the image in the
+Asset Library and choose **Delete detection** beside a particular OCR chunk,
+then confirm the warning. This removes only that retained OCR chunk, its
+search-index entry, and its text-object reference while keeping the original
+image, technical image metadata, and other detections. Citations that pointed
+to the deleted passage will no longer resolve. To remove every OCR detection at
+once, choose **Delete detected text** in the image details; run OCR again to
+create new detected-text chunks.
 
 Pinky watches successfully ingested local files. After a file becomes stable,
 an edit creates a new retained and searchable version. If replacement indexing
@@ -261,8 +304,10 @@ workflow is:
    specifications, logs, or code you want Pinky to retain.
 2. Prefer descriptive filenames and structured text with headings. This makes
    the source list and citation passages easier to understand.
-3. Add each file with the narrowest sensible approved directory. Approving a
-   project directory is clearer than approving your whole home directory.
+3. Add the first file with the narrowest sensible approved directory. Pinky
+   then discovers later regular files placed under that approved directory;
+   approving a project directory is clearer than approving your whole home
+   directory.
 4. Confirm that ingestion completes and that the source shows an active chunk
    count in the left panel.
 5. Search using distinctive names, error messages, identifiers, or phrases
@@ -319,6 +364,12 @@ data; preserve the vault for the planned recovery interface.
 ## 7. Operational controls and current limits
 
 - Active ingestion and system-check operations appear in the right panel.
+- Select **Inspect task** on any operation to expand its diagnostics pane. It
+  shows the task UUID, tool/resource context, permission and budget state, the
+  complete event timeline retained in the current session, structured errors,
+  and expandable raw event payloads. Failed tasks open this pane automatically
+  so OCR and other worker failures can be reviewed without losing their exact
+  error message.
 - Use **Pause**, **Resume**, or **Stop** when those controls are offered.
 - **Stop all** cancels all currently cancellable operations.
 - The animated ASCII entity is named **ALMA**, short for **Archived Local Memory
