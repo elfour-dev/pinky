@@ -502,7 +502,10 @@ struct ModelDetails {
 }
 
 fn normalize_embedding_digest(value: Option<&str>) -> Option<String> {
-    let digest = value?.strip_prefix("sha256:")?;
+    // Ollama's `/api/tags` has returned both a bare 64-character digest and
+    // a `sha256:`-prefixed digest across releases and model registries.
+    let value = value?;
+    let digest = value.strip_prefix("sha256:").unwrap_or(value);
     (digest.len() == 64
         && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
         && !digest.bytes().any(|byte| byte.is_ascii_uppercase()))
@@ -740,12 +743,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_only_a_lowercase_sha256_ollama_digest() {
+    fn accepts_a_lowercase_ollama_digest_with_or_without_sha256_prefix() {
+        let raw = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let valid = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         assert_eq!(
             normalize_embedding_digest(Some(valid)).as_deref(),
-            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            Some(raw)
         );
+        assert_eq!(normalize_embedding_digest(Some(raw)).as_deref(), Some(raw));
         assert!(normalize_embedding_digest(None).is_none());
         assert!(normalize_embedding_digest(Some("sha256:short")).is_none());
         assert!(normalize_embedding_digest(Some(
