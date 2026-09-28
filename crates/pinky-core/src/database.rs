@@ -6,12 +6,13 @@ use zeroize::Zeroizing;
 
 use crate::{ArtifactKind, ArtifactManifestV1, Vault, VaultError};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const MIGRATION_001: &str = include_str!("../migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("../migrations/002_hybrid_configuration.sql");
 const MIGRATION_003: &str = include_str!("../migrations/003_asset_indexes.sql");
 const MIGRATION_004: &str = include_str!("../migrations/004_ollama_configuration.sql");
 const MIGRATION_005: &str = include_str!("../migrations/005_verified_artifacts.sql");
+const MIGRATION_006: &str = include_str!("../migrations/006_source_watch_controls.sql");
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -92,6 +93,7 @@ impl Database {
             connection.execute_batch(MIGRATION_003)?;
             connection.execute_batch(MIGRATION_004)?;
             connection.execute_batch(MIGRATION_005)?;
+            connection.execute_batch(MIGRATION_006)?;
         } else {
             if version < 2 {
                 connection.execute_batch(MIGRATION_002)?;
@@ -104,6 +106,9 @@ impl Database {
             }
             if version < 5 {
                 connection.execute_batch(MIGRATION_005)?;
+            }
+            if version < 6 {
+                connection.execute_batch(MIGRATION_006)?;
             }
         }
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;

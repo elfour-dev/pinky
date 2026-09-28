@@ -69,6 +69,8 @@ pub enum IngestionError {
     InvalidAssetFilter { field: &'static str, value: String },
     #[error("invalid asset cursor")]
     InvalidAssetCursor,
+    #[error("retained source {0} was not found or was already removed")]
+    SourceNotFound(Uuid),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +92,8 @@ pub struct SourceSummary {
     pub kind: String,
     pub display_name: String,
     pub canonical_uri: String,
+    pub approval_scope: String,
+    pub watch_paused: bool,
     pub mime_type: String,
     pub byte_size: u64,
     pub chunk_count: usize,
@@ -509,7 +513,7 @@ impl LocalIngestor {
             .lock()
             .map_err(|_| IngestionError::DatabaseLock)?;
         let mut statement = database.connection().prepare(
-            "SELECT s.id, v.id, s.kind, s.display_name, s.canonical_uri, v.mime_type, v.byte_size,
+            "SELECT s.id, v.id, s.kind, s.display_name, s.canonical_uri, s.approval_scope, s.watch_paused, v.mime_type, v.byte_size,
                     (SELECT COUNT(*) FROM chunks c WHERE c.source_version_id = v.id),
                     s.state, s.updated_at
              FROM sources s
@@ -519,6 +523,45 @@ impl LocalIngestor {
         )?;
         let rows = statement.query_map([], source_summary_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Remove a source from Pinky's searchable library and local watcher
+    /// without touching the original file on disk. Existing encrypted objects
+    /// remain available to internal retention cleanup, but this source can no
+    /// longer be searched, cited, or watched.
+    pub fn remove_source(&self, source_id: Uuid) -> Result<(), IngestionError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| IngestionError::DatabaseLock)?;
+        let changed = database.connection().execute(
+            "UPDATE sources SET state = 'deleted', updated_at = ?1, last_checked_at = ?1
+             WHERE id = ?2 AND state != 'deleted'",
+            params![Utc::now().to_rfc3339(), source_id.to_string()],
+        )?;
+        if changed != 1 {
+            return Err(IngestionError::SourceNotFound(source_id));
+        }
+        Ok(())
+    }
+
+    pub fn set_source_watch_paused(
+        &self,
+        source_id: Uuid,
+        paused: bool,
+    ) -> Result<(), IngestionError> {
+        let database = self
+            .database
+            .lock()
+            .map_err(|_| IngestionError::DatabaseLock)?;
+        let changed = database.connection().execute(
+            "UPDATE sources SET watch_paused = ?1, updated_at = ?2 WHERE id = ?3 AND state != 'deleted'",
+            params![paused, Utc::now().to_rfc3339(), source_id.to_string()],
+        )?;
+        if changed != 1 {
+            return Err(IngestionError::SourceNotFound(source_id));
+        }
+        Ok(())
     }
 
     /// Return a bounded, filterable asset page. The cursor is opaque to the
@@ -665,7 +708,7 @@ impl LocalIngestor {
         };
         let page_where_sql = page_filters.join(" AND ");
         let page_sql = format!(
-            "SELECT s.id, v.id, s.kind, s.display_name, s.canonical_uri, v.mime_type,
+            "SELECT s.id, v.id, s.kind, s.display_name, s.canonical_uri, s.approval_scope, s.watch_paused, v.mime_type,
                     v.byte_size,
                     (SELECT COUNT(*) FROM chunks c WHERE c.source_version_id = v.id),
                     s.state, s.updated_at
@@ -1065,7 +1108,7 @@ impl LocalIngestor {
             "SELECT s.id, s.canonical_uri, s.approval_scope, v.selected_headers_json, s.state
              FROM sources s
              JOIN source_versions v ON v.id = s.current_version_id
-             WHERE s.kind = 'local_file' AND s.state != 'deleted'
+             WHERE s.kind = 'local_file' AND s.state != 'deleted' AND s.watch_paused = 0
              ORDER BY s.id",
         )?;
         let rows = statement.query_map([], |row| {
@@ -1270,11 +1313,13 @@ fn source_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceSu
         kind: row.get(2)?,
         display_name: row.get(3)?,
         canonical_uri: row.get(4)?,
-        mime_type: row.get(5)?,
-        byte_size: row.get::<_, i64>(6)? as u64,
-        chunk_count: row.get::<_, i64>(7)? as usize,
-        state: row.get(8)?,
-        updated_at: row.get(9)?,
+        approval_scope: row.get(5)?,
+        watch_paused: row.get(6)?,
+        mime_type: row.get(7)?,
+        byte_size: row.get::<_, i64>(8)? as u64,
+        chunk_count: row.get::<_, i64>(9)? as usize,
+        state: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 

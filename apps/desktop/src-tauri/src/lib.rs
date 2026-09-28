@@ -179,6 +179,17 @@ struct DeleteImageOcrRequest {
 }
 
 #[derive(Deserialize)]
+struct RemoveSourceRequest {
+    source_id: Uuid,
+}
+
+#[derive(Deserialize)]
+struct SetSourceWatchRequest {
+    source_id: Uuid,
+    paused: bool,
+}
+
+#[derive(Deserialize)]
 struct DeleteImageOcrChunkRequest {
     source_id: Uuid,
     version_id: Uuid,
@@ -2056,6 +2067,26 @@ async fn ingest_local_file(
 }
 
 #[tauri::command]
+fn remove_source(
+    request: RemoveSourceRequest,
+    runtime: State<'_, AppRuntime>,
+) -> Result<(), String> {
+    local_ingestor(runtime.inner())?
+        .remove_source(request.source_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_source_watch_paused(
+    request: SetSourceWatchRequest,
+    runtime: State<'_, AppRuntime>,
+) -> Result<(), String> {
+    local_ingestor(runtime.inner())?
+        .set_source_watch_paused(request.source_id, request.paused)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn ocr_image(
     request: OcrImageRequest,
     runtime: State<'_, AppRuntime>,
@@ -2804,6 +2835,8 @@ pub fn run() {
             unlock_vault,
             start_system_check,
             ingest_local_file,
+            remove_source,
+            set_source_watch_paused,
             ocr_image,
             delete_image_ocr,
             delete_image_ocr_chunk,

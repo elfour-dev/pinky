@@ -39,6 +39,8 @@ export interface SourceSummary {
   kind: "local_file" | "web_page" | "search_result" | "generated";
   display_name: string;
   canonical_uri: string;
+  approval_scope: string;
+  watch_paused: boolean;
   mime_type: string;
   byte_size: number;
   chunk_count: number;
