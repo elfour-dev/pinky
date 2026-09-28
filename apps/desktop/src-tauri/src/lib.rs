@@ -1078,6 +1078,27 @@ async fn install_signed_artifact(
             .map_err(|error| error.to_string())?;
         (session.database.clone(), session.vault.clone())
     };
+    if let Some(existing) = database
+        .lock()
+        .map_err(|_| "vault database lock is poisoned".to_owned())?
+        .verified_artifact(&signed.manifest.artifact_id)
+        .map_err(|error| error.to_string())?
+    {
+        let installed_path = PathBuf::from(&existing.installed_path);
+        if existing.key_id == signed.key_id
+            && existing.manifest == signed.manifest
+            && fs::symlink_metadata(&installed_path).is_ok_and(|metadata| {
+                metadata.file_type().is_file() && !metadata.file_type().is_symlink()
+            })
+        {
+            return Ok(InstallSignedArtifactResponse {
+                artifact_id: signed.manifest.artifact_id.clone(),
+                installed_path: existing.installed_path,
+                sha256: signed.manifest.sha256.clone(),
+                byte_size: signed.manifest.byte_size,
+            });
+        }
+    }
     let directory = artifact_install_directory(&app, &signed.manifest.sha256)?;
     let destination = directory.join("payload");
     let (sender, receiver) = tokio::sync::oneshot::channel();
