@@ -1708,6 +1708,10 @@ async fn run_local_watcher(
     let mut discovery_pending = HashMap::<PathBuf, PendingObservation>::new();
     let mut discovery_in_flight = HashSet::<PathBuf>::new();
     let mut discovery_cooldown = HashMap::<PathBuf, Instant>::new();
+    // Files already present when an approved root is first observed are not
+    // silently retained in bulk. Keep their fingerprints so only a later
+    // creation or edit becomes a discoverable ingestion task.
+    let mut discovery_baseline = HashMap::<PathBuf, HashMap<PathBuf, LocalFileFingerprint>>::new();
     let (discovery_done_tx, mut discovery_done_rx) =
         tokio::sync::mpsc::unbounded_channel::<(PathBuf, bool)>();
 
@@ -1770,6 +1774,7 @@ async fn run_local_watcher(
         discovery_in_flight.retain(|path| approved_roots.iter().any(|root| path.starts_with(root)));
         discovery_cooldown
             .retain(|path, _| approved_roots.iter().any(|root| path.starts_with(root)));
+        discovery_baseline.retain(|root, _| approved_roots.contains(root));
 
         for target in targets {
             if in_flight.contains(&target.source_id)
@@ -1833,6 +1838,18 @@ async fn run_local_watcher(
                     continue;
                 }
             };
+            let current_fingerprints = files
+                .iter()
+                .filter_map(|path| {
+                    LocalFileFingerprint::read(path)
+                        .ok()
+                        .map(|fingerprint| (path.clone(), fingerprint))
+                })
+                .collect::<HashMap<_, _>>();
+            let baseline = discovery_baseline
+                .entry(approved_root.clone())
+                .or_insert_with(|| current_fingerprints.clone());
+            baseline.retain(|path, _| current_fingerprints.contains_key(path));
             for source_path in files {
                 if known_paths.contains(&source_path)
                     || discovery_in_flight.contains(&source_path)
@@ -1843,9 +1860,16 @@ async fn run_local_watcher(
                     discovery_pending.remove(&source_path);
                     continue;
                 }
-                let Ok(fingerprint) = LocalFileFingerprint::read(&source_path) else {
+                let Some(fingerprint) = current_fingerprints.get(&source_path).cloned() else {
                     continue;
                 };
+                if baseline
+                    .get(&source_path)
+                    .is_some_and(|existing| existing == &fingerprint)
+                {
+                    continue;
+                }
+                baseline.remove(&source_path);
                 if stable_discovery_ready(
                     &mut discovery_pending,
                     &source_path,
@@ -3021,6 +3045,8 @@ mod desktop_tests {
             ingestor.clone(),
             cancellation.clone(),
         ));
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         let discovered = approved_root.path().join("added-later.md");
         fs::write(&discovered, "a source added after approval").unwrap();
