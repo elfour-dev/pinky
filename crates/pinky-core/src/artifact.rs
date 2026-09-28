@@ -259,15 +259,23 @@ impl ArtifactManifestV1 {
     }
 
     /// Download this immutable manifest URL and install it atomically after
-    /// checking the declared size and SHA-256. Redirects are not followed: a
-    /// signed URL must be the URL that is actually fetched.
+    /// checking the declared size and SHA-256. A short HTTPS-only redirect
+    /// chain supports immutable upstream release URLs (including GitHub's
+    /// release-asset host); the signed size and SHA-256 remain the authority
+    /// for the downloaded bytes.
     pub async fn download_and_install(
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<ArtifactDigest, ArtifactError> {
         self.validate()?;
         let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 3 || attempt.url().scheme() != "https" {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()?;
         let destination = destination.as_ref();
         if !destination.is_absolute() {

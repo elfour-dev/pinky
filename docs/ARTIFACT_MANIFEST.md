@@ -62,9 +62,10 @@ For Ollama-managed embedding models, R7 records the installed model's
 as 64 lowercase hexadecimal characters before a future signed allowlist may
 match it; the mutable Ollama model name alone is insufficient attestation.
 
-Installation streams the exact HTTPS manifest URL without following redirects
-into a uniquely named temporary file in the destination directory, enforces
-the declared byte limit, verifies that temporary file, flushes it, and then
+Installation follows at most three HTTPS redirects from the signed manifest
+URL (needed by common official release hosts) into a uniquely named temporary
+file in the destination directory, enforces the declared byte limit, verifies
+that temporary file, flushes it, and then
 renames it atomically. Official Qdrant Linux release archives are extracted
 only after this verification; Pinky accepts exactly one regular top-level
 `qdrant` payload and rejects links or extra entries. Invalid or incomplete
