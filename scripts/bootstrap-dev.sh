@@ -26,6 +26,18 @@ warn() {
   printf 'bootstrap-dev: warning: %s\n' "$1" >&2
 }
 
+node_version_is_supported() {
+  local version="${1#v}"
+  local major minor patch
+  IFS=. read -r major minor patch <<< "$version"
+  case "$major:$minor" in
+    20:*) [ "$minor" -ge 19 ] ;;
+    22:*) [ "$minor" -ge 12 ] ;;
+    2[3-9]:*|[3-9][0-9]:*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 skip_e2e=0
 for argument in "$@"; do
   case "$argument" in
@@ -89,7 +101,6 @@ apt_packages=(
   libwebkit2gtk-4.1-dev
   libxdo-dev
   librsvg2-dev
-  npm
   pkg-config
   patchelf
   poppler-utils
@@ -102,16 +113,36 @@ apt_packages=(
   xvfb
 )
 
-if [ "$node_major" -lt 20 ]; then
-  apt_packages+=(nodejs)
+if [ "$node_major" -lt 20 ] || ! command -v npm >/dev/null 2>&1; then
+  # Distribution npm must only be considered when the selected Node runtime
+  # does not already provide it.  NodeSource's Node 20 package includes npm;
+  # requesting Ubuntu's npm alongside it can create an unrelated dependency
+  # conflict on otherwise usable hosts.
+  apt_packages+=(nodejs npm)
 fi
 
 printf 'Installing Debian/Ubuntu packages...\n'
 "${apt_command[@]}" update
+
+# libwebkit2gtk requires Soup development headers that exactly match the
+# installed Soup runtime. Some multimedia PPAs upgrade the runtime without
+# changing apt's preferred development-header candidate. Prefer the installed
+# version only when both matching packages are actually available, avoiding a
+# needless downgrade or a resolver failure on those hosts.
+installed_soup_version="$(dpkg-query -W -f='${Version}' libsoup-3.0-0 2>/dev/null || true)"
+if [ -n "$installed_soup_version" ] \
+  && apt-cache show "libsoup-3.0-dev=${installed_soup_version}" >/dev/null 2>&1 \
+  && apt-cache show "gir1.2-soup-3.0=${installed_soup_version}" >/dev/null 2>&1; then
+  apt_packages+=(
+    "libsoup-3.0-dev=${installed_soup_version}"
+    "gir1.2-soup-3.0=${installed_soup_version}"
+  )
+  printf 'Using Soup development headers matching installed runtime %s.\n' "$installed_soup_version"
+fi
 "${apt_command[@]}" install -y --no-install-recommends "${apt_packages[@]}"
 
-node_major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || printf '0')"
-(( node_major >= 20 )) || die "Node.js 20 or newer is required; found $(node --version 2>/dev/null || printf 'none'). Install a newer LTS release and rerun this script."
+node_version="$(node --version 2>/dev/null || printf 'none')"
+node_version_is_supported "$node_version" || die "Node.js 20.19.0+ or 22.12.0+ is required; active runtime is ${node_version} at $(command -v node 2>/dev/null || printf 'none'). If NVM shadows a newer system Node, run this script with PATH=/usr/bin:\$PATH or install/select a supported NVM version, then rerun."
 command -v npm >/dev/null 2>&1 || die 'npm is unavailable after package installation'
 
 # Load an existing rustup installation before deciding whether Rust is absent.

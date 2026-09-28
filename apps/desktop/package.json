@@ -13,6 +13,7 @@
     "test:e2e": "npm run build:native:test && xvfb-run -a npm --prefix e2e test",
     "verify:bundle": "node scripts/verify-linux-bundle.mjs",
     "inspect:plaintext": "node scripts/inspect-plaintext.mjs",
+    "test:artifact-dev": "node ../../scripts/artifact-dev.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

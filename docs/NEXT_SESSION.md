@@ -14,6 +14,14 @@ The authoritative delivery sequence, contracts, and gates are in
 [`CITED_QA_PHASES.md`](CITED_QA_PHASES.md).
 The ordered remaining-feature roadmap is in [`ROADMAP.md`](ROADMAP.md).
 
+## Distribution posture
+
+Pinky is for its personal owner and, at most, a small trusted circle. It has no
+public-release or public-key-hosting requirement. The owner keeps the artifact
+signing private key outside the checkout, bundles the matching public key in a
+private build, and signs approved artifacts. Signature, HTTPS, digest, and
+size checks remain mandatory.
+
 ## Phase baseline before R3
 
 ```text
@@ -99,8 +107,9 @@ run with explicit local-loopback permission.
 ## Next implementation slice: close R7, then close R9
 
 Do not begin R10 or any later feature work. First close the remaining R7
-target-host acceptance checks (signed artifact installation, retained-chunk
-backfill, warm benchmark, and the SSH-specific process-boundary review).
+private-host acceptance checks (owner-signed artifact installation, retained-chunk
+backfill, and warm benchmark). The SSH-specific process-boundary review is
+required only if the configured model route uses SSH; direct loopback is N/A.
 After R7 is closed, run the interrupted-process PDF acceptance needed to close
 R9. Only then may the next phase be selected.
 R7 now includes the bounded embedding
@@ -120,8 +129,9 @@ downloads with redirects rejected, and atomic installation. The core reranker
 now bounds hybrid selection to 30 fused candidates and 12 returned citations.
 Use `docs/PRIVACY_INSPECTION.md` for the scanner command and run
 the ignored live test with `PINKY_OLLAMA_ENDPOINT` and
-`PINKY_OLLAMA_MODEL` set. The remaining R7 release gate is target-host
-onboarding/backfill with a verified Qdrant executable and embedding model,
+`PINKY_OLLAMA_MODEL` set. The remaining R7 owner gate is private-host
+onboarding/backfill with an owner-signed verified Qdrant executable and
+embedding model,
 followed by the one-million-chunk warm p95 measurement.
 
 Product priority change: R8 image metadata ingestion is implemented for PNG,

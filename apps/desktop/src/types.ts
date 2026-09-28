@@ -27,6 +27,12 @@ export interface VaultPaths { cipher_dir: string; mount_dir: string; }
 export interface SetupVaultResponse { vault_id: string; recovery_path: string; }
 export interface AttachLlamaResponse { provider: string; model_name: string; context_size: number; total_slots: number; }
 export interface HybridConfiguration { qdrant_executable: string; embedding_endpoint: string; embedding_model: string; }
+export interface InstallSignedArtifactResponse {
+  artifact_id: string;
+  installed_path: string;
+  sha256: string;
+  byte_size: number;
+}
 export interface SourceSummary {
   source_id: string;
   version_id: string;

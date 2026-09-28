@@ -29,14 +29,17 @@ pub mod task_journal;
 pub mod vault;
 
 pub use artifact::{
-    ArtifactDigest, ArtifactError, ArtifactKind, ArtifactManifestV1, SignedArtifactManifestV1,
+    parse_trusted_artifact_keys_json, ArtifactDigest, ArtifactError, ArtifactKind,
+    ArtifactManifestV1, SignedArtifactManifestV1, TrustedArtifactKey,
     ARTIFACT_MANIFEST_SCHEMA_VERSION,
 };
 pub use conversation::{
     ConversationDetail, ConversationError, ConversationMessage, ConversationService,
     ConversationSummary, MessageDraft,
 };
-pub use database::{Database, DatabaseError, HybridConfiguration, OllamaConfiguration};
+pub use database::{
+    Database, DatabaseError, HybridConfiguration, OllamaConfiguration, VerifiedArtifact,
+};
 pub use embedding::{
     EmbeddingError, EmbeddingFuture, EmbeddingIndexError, EmbeddingIndexer, EmbeddingProvider,
     EmbeddingResponse, DEFAULT_EMBEDDING_BATCH_SIZE, MAX_EMBEDDING_ERROR_BYTES,

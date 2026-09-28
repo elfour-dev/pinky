@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -21,12 +22,16 @@ const COPY_BUFFER_BYTES: usize = 64 * 1024;
 pub enum ArtifactError {
     #[error("artifact manifest JSON is invalid: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("trusted artifact-key JSON is invalid: {0}")]
+    TrustedKeyJson(serde_json::Error),
     #[error("artifact manifest schema version {0} is unsupported")]
     UnsupportedSchema(u16),
     #[error("artifact manifest field `{0}` must not be empty")]
     EmptyField(&'static str),
     #[error("artifact manifest field `{0}` contains whitespace")]
     WhitespaceField(&'static str),
+    #[error("artifact manifest artifact_id must use only ASCII letters, digits, `.`, `_`, or `-`")]
+    InvalidArtifactId,
     #[error("artifact manifest URL `{field}` must be an HTTPS URL")]
     InsecureUrl { field: &'static str },
     #[error("artifact manifest URL `{field}` is invalid")]
@@ -43,6 +48,14 @@ pub enum ArtifactError {
     InvalidSignatureEncoding,
     #[error("artifact manifest signature could not be verified")]
     InvalidSignature,
+    #[error("artifact manifest uses unknown trusted key `{0}`")]
+    UnknownTrustedKey(String),
+    #[error("trusted artifact public key `{key_id}` must contain exactly 256 bits")]
+    InvalidTrustedPublicKey { key_id: String },
+    #[error("trusted artifact public key `{key_id}` is not valid base64")]
+    InvalidTrustedPublicKeyEncoding { key_id: String },
+    #[error("trusted artifact key `{0}` appears more than once")]
+    DuplicateTrustedKey(String),
     #[error("artifact file is not a regular file: {0}")]
     NotRegularFile(PathBuf),
     #[error("artifact file size is {found} bytes, expected {expected}")]
@@ -93,6 +106,51 @@ pub struct SignedArtifactManifestV1 {
     pub signature: String,
 }
 
+/// A release public key compiled into Pinky. The key ID comes from the signed
+/// envelope and is not itself trusted until it selects one of these keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedArtifactKey {
+    pub key_id: String,
+    pub public_key: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrustedArtifactKeyWire {
+    key_id: String,
+    public_key_base64: String,
+}
+
+/// Parses the release public-key resource compiled into the desktop binary.
+/// The resource is a JSON array of `{key_id, public_key_base64}` objects.
+pub fn parse_trusted_artifact_keys_json(
+    bytes: &[u8],
+) -> Result<Vec<TrustedArtifactKey>, ArtifactError> {
+    let keys: Vec<TrustedArtifactKeyWire> =
+        serde_json::from_slice(bytes).map_err(ArtifactError::TrustedKeyJson)?;
+    let mut ids = HashSet::with_capacity(keys.len());
+    keys.into_iter()
+        .map(|key| {
+            non_empty_without_whitespace(&key.key_id, "key_id")?;
+            if !ids.insert(key.key_id.clone()) {
+                return Err(ArtifactError::DuplicateTrustedKey(key.key_id));
+            }
+            let public_key = STANDARD
+                .decode(key.public_key_base64.as_bytes())
+                .map_err(|_| ArtifactError::InvalidTrustedPublicKeyEncoding {
+                    key_id: key.key_id.clone(),
+                })?;
+            if public_key.len() != 32 {
+                return Err(ArtifactError::InvalidTrustedPublicKey { key_id: key.key_id });
+            }
+            Ok(TrustedArtifactKey {
+                key_id: key.key_id,
+                public_key,
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactDigest {
     pub sha256: String,
@@ -104,7 +162,7 @@ impl ArtifactManifestV1 {
         if self.schema_version != ARTIFACT_MANIFEST_SCHEMA_VERSION {
             return Err(ArtifactError::UnsupportedSchema(self.schema_version));
         }
-        non_empty_without_whitespace(&self.artifact_id, "artifact_id")?;
+        validate_artifact_id(&self.artifact_id)?;
         non_empty_without_whitespace(&self.capability, "capability")?;
         non_empty_without_whitespace(&self.version, "version")?;
         non_empty_without_whitespace(&self.runtime_version, "runtime_version")?;
@@ -329,6 +387,23 @@ impl SignedArtifactManifestV1 {
             .map_err(|_| ArtifactError::InvalidSignature)
     }
 
+    pub fn verify_with_trusted_keys(
+        &self,
+        trusted_keys: &[TrustedArtifactKey],
+    ) -> Result<(), ArtifactError> {
+        self.validate()?;
+        let key = trusted_keys
+            .iter()
+            .find(|key| key.key_id == self.key_id)
+            .ok_or_else(|| ArtifactError::UnknownTrustedKey(self.key_id.clone()))?;
+        if key.public_key.len() != 32 {
+            return Err(ArtifactError::InvalidTrustedPublicKey {
+                key_id: key.key_id.clone(),
+            });
+        }
+        self.verify(&key.public_key)
+    }
+
     pub fn canonical_payload(&self) -> Result<Vec<u8>, ArtifactError> {
         self.manifest.validate()?;
         let mut payload = SIGNING_CONTEXT.to_vec();
@@ -343,6 +418,17 @@ fn non_empty_without_whitespace(value: &str, field: &'static str) -> Result<(), 
     }
     if value.chars().any(char::is_whitespace) {
         return Err(ArtifactError::WhitespaceField(field));
+    }
+    Ok(())
+}
+
+fn validate_artifact_id(value: &str) -> Result<(), ArtifactError> {
+    non_empty_without_whitespace(value, "artifact_id")?;
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(ArtifactError::InvalidArtifactId);
     }
     Ok(())
 }
@@ -470,6 +556,55 @@ mod tests {
     }
 
     #[test]
+    fn verifies_only_against_a_matching_well_formed_trusted_key() {
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(&[9_u8; 32]).unwrap();
+        let signed = signed(manifest(b"model bytes"), &key_pair);
+        let key = TrustedArtifactKey {
+            key_id: "pinky-test-key".into(),
+            public_key: key_pair.public_key().as_ref().to_vec(),
+        };
+        signed.verify_with_trusted_keys(&[key]).unwrap();
+
+        assert!(matches!(
+            signed.verify_with_trusted_keys(&[]),
+            Err(ArtifactError::UnknownTrustedKey(_))
+        ));
+        assert!(matches!(
+            signed.verify_with_trusted_keys(&[TrustedArtifactKey {
+                key_id: "pinky-test-key".into(),
+                public_key: vec![0; 31],
+            }]),
+            Err(ArtifactError::InvalidTrustedPublicKey { .. })
+        ));
+    }
+
+    #[test]
+    fn parses_only_unambiguous_256_bit_trusted_keys() {
+        let encoded = STANDARD.encode([5_u8; 32]);
+        let json =
+            format!(r#"[{{"key_id":"release-key-2026-01","public_key_base64":"{encoded}"}}]"#);
+        assert_eq!(
+            parse_trusted_artifact_keys_json(json.as_bytes()).unwrap(),
+            vec![TrustedArtifactKey {
+                key_id: "release-key-2026-01".into(),
+                public_key: vec![5_u8; 32],
+            }]
+        );
+        assert!(matches!(
+            parse_trusted_artifact_keys_json(
+                br#"[{"key_id":"same","public_key_base64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},{"key_id":"same","public_key_base64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}]"#
+            ),
+            Err(ArtifactError::DuplicateTrustedKey(_))
+        ));
+        assert!(matches!(
+            parse_trusted_artifact_keys_json(
+                br#"[{"key_id":"bad","public_key_base64":"not base64"}]"#
+            ),
+            Err(ArtifactError::InvalidTrustedPublicKeyEncoding { .. })
+        ));
+    }
+
+    #[test]
     fn rejects_invalid_metadata_before_signature_work() {
         let mut manifest = manifest(b"model bytes");
         manifest.url = "http://models.example.test/model.gguf".into();
@@ -482,6 +617,12 @@ mod tests {
         assert!(matches!(
             manifest.validate(),
             Err(ArtifactError::InvalidSha256)
+        ));
+        manifest.sha256 = "a".repeat(64);
+        manifest.artifact_id = "../qdrant".into();
+        assert!(matches!(
+            manifest.validate(),
+            Err(ArtifactError::InvalidArtifactId)
         ));
     }
 

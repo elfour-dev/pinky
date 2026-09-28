@@ -7,17 +7,17 @@ use std::{
 };
 
 use pinky_core::{
-    answer_question_with_history, create_registered_vault, read_registration,
-    unlock_registered_vault, AnswerEnvelopeV1, AssetListQuery, AssetListResponse, CitationPassage,
-    ClaimSupportV1, ConversationDetail, ConversationService, ConversationSummary,
-    ConversationTurnV1, EmbeddingIndexer, GocryptfsMount, HybridConfiguration, ImageOcrWorker,
-    InferenceError, InferenceFuture, InferenceProvider, LlamaClient, LlamaError,
+    answer_question_with_history, create_registered_vault, parse_trusted_artifact_keys_json,
+    read_registration, unlock_registered_vault, AnswerEnvelopeV1, AssetListQuery,
+    AssetListResponse, CitationPassage, ClaimSupportV1, ConversationDetail, ConversationService,
+    ConversationSummary, ConversationTurnV1, EmbeddingIndexer, GocryptfsMount, HybridConfiguration,
+    ImageOcrWorker, InferenceError, InferenceFuture, InferenceProvider, LlamaClient, LlamaError,
     LocalFileFingerprint, LocalIngestor, LocalWatchTarget, MessageDraft, ObjectStore, OllamaClient,
     OllamaConfiguration, OllamaError, OllamaRuntimeInfo, OnboardedVault, PdfTextExtractor, QaError,
-    QdrantLaunchConfig, QdrantSidecar, RetainedImage, RetrievalService, SearchHit, SourceSummary,
-    StructuredGenerationRequest, SystemVaultPlatform, TaskContext, TaskJournal, TaskManager, Vault,
-    VaultPaths, VaultRegistration, AUTO_OCR_CONFIDENCE_THRESHOLDS,
-    AUTO_OCR_PAGE_SEGMENTATION_MODES, DEFAULT_OCR_MIN_CONFIDENCE,
+    QdrantLaunchConfig, QdrantSidecar, RetainedImage, RetrievalService, SearchHit,
+    SignedArtifactManifestV1, SourceSummary, StructuredGenerationRequest, SystemVaultPlatform,
+    TaskContext, TaskJournal, TaskManager, Vault, VaultPaths, VaultRegistration, VerifiedArtifact,
+    AUTO_OCR_CONFIDENCE_THRESHOLDS, AUTO_OCR_PAGE_SEGMENTATION_MODES, DEFAULT_OCR_MIN_CONFIDENCE,
     DEFAULT_OCR_PAGE_SEGMENTATION_MODE,
 };
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,8 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindowBuilder};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
+
+const TRUSTED_ARTIFACT_KEYS_JSON: &[u8] = include_bytes!("../trusted-artifact-keys.json");
 
 #[derive(Serialize)]
 struct RuntimeStatus {
@@ -200,6 +202,19 @@ struct ConfigureHybridRequest {
     qdrant_executable: PathBuf,
     embedding_endpoint: String,
     embedding_model: String,
+}
+
+#[derive(Deserialize)]
+struct InstallSignedArtifactRequest {
+    signed_manifest_json: String,
+}
+
+#[derive(Debug, Serialize)]
+struct InstallSignedArtifactResponse {
+    artifact_id: String,
+    installed_path: String,
+    sha256: String,
+    byte_size: u64,
 }
 
 #[derive(Deserialize)]
@@ -922,12 +937,30 @@ fn hybrid_search_config(runtime: &AppRuntime) -> Result<Option<HybridSearchConfi
             .vault
             .as_ref()
             .ok_or_else(|| "the encrypted vault is not unlocked".to_owned())?;
-        let stored = session
+        let database = session
             .database
             .lock()
-            .map_err(|_| "vault database lock is poisoned".to_owned())?
+            .map_err(|_| "vault database lock is poisoned".to_owned())?;
+        let stored = database
             .hybrid_configuration()
             .map_err(|error| error.to_string())?;
+        if let Some(configuration) = stored.as_ref() {
+            let artifact = database
+                .verified_artifact_by_installed_path(&configuration.qdrant_executable)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    "saved hybrid retrieval configuration refers to an unverified Qdrant executable"
+                        .to_owned()
+                })?;
+            if artifact.manifest.kind != pinky_core::ArtifactKind::Executable
+                || artifact.manifest.capability != "vector_database"
+            {
+                return Err(
+                    "saved hybrid retrieval configuration refers to a non-Qdrant verified artifact"
+                        .to_owned(),
+                );
+            }
+        }
         (session.vault.clone(), stored)
     };
     vault.ensure_mounted().map_err(|error| error.to_string())?;
@@ -982,6 +1015,180 @@ fn parse_hybrid_configuration(
         return Err("the hybrid Ollama endpoint and embedding model must not be empty".to_owned());
     }
     Ok(Some((executable, endpoint, model)))
+}
+
+fn trusted_artifact_keys() -> Result<Vec<pinky_core::TrustedArtifactKey>, String> {
+    let keys = parse_trusted_artifact_keys_json(TRUSTED_ARTIFACT_KEYS_JSON)
+        .map_err(|error| format!("bundled artifact keyring is invalid: {error}"))?;
+    if keys.is_empty() {
+        return Err(
+            "this Pinky build has no owner-approved trusted artifact keys; signed artifact onboarding is unavailable"
+                .to_owned(),
+        );
+    }
+    Ok(keys)
+}
+
+fn artifact_install_directory(app: &AppHandle, sha256: &str) -> Result<PathBuf, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("artifacts");
+    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let root_metadata = fs::symlink_metadata(&root).map_err(|error| error.to_string())?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err("artifact installation directory is not a safe directory".to_owned());
+    }
+    let directory = root.join(sha256);
+    fs::create_dir(&directory).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "a verified artifact with this digest is already installed".to_owned()
+        } else {
+            error.to_string()
+        }
+    })?;
+    Ok(directory)
+}
+
+#[tauri::command]
+async fn install_signed_artifact(
+    request: InstallSignedArtifactRequest,
+    app: AppHandle,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<InstallSignedArtifactResponse, String> {
+    let signed = SignedArtifactManifestV1::from_json(request.signed_manifest_json.as_bytes())
+        .map_err(|error| error.to_string())?;
+    signed
+        .verify_with_trusted_keys(&trusted_artifact_keys()?)
+        .map_err(|error| error.to_string())?;
+    let (database, vault) = {
+        let data = runtime
+            .data
+            .lock()
+            .map_err(|_| "runtime lock is poisoned".to_owned())?;
+        let session = data
+            .vault
+            .as_ref()
+            .ok_or_else(|| "unlock the encrypted vault before installing an artifact".to_owned())?;
+        session
+            .vault
+            .ensure_mounted()
+            .map_err(|error| error.to_string())?;
+        (session.database.clone(), session.vault.clone())
+    };
+    let directory = artifact_install_directory(&app, &signed.manifest.sha256)?;
+    let destination = directory.join("payload");
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tasks.spawn("signed artifact install", None, move |context| async move {
+        let outcome: Result<InstallSignedArtifactResponse, String> = async {
+            context.progress(
+                "signed artifact install",
+                Some(0.1),
+                "Downloading and verifying signed artifact",
+            );
+            let is_qdrant_archive = signed.manifest.kind == pinky_core::ArtifactKind::Executable
+                && signed.manifest.capability == "vector_database";
+            let downloaded_path = if is_qdrant_archive {
+                directory.join("qdrant.tar.gz")
+            } else {
+                destination.clone()
+            };
+            let digest = signed
+                .manifest
+                .download_and_install(&downloaded_path)
+                .await
+                .map_err(|error| error.to_string())?;
+            if is_qdrant_archive {
+                extract_verified_qdrant_archive(&downloaded_path, &destination).await?;
+                fs::remove_file(&downloaded_path).map_err(|error| error.to_string())?;
+            }
+            vault.ensure_mounted().map_err(|error| error.to_string())?;
+            context.progress(
+                "signed artifact install",
+                Some(0.9),
+                "Recording encrypted artifact provenance",
+            );
+            database
+                .lock()
+                .map_err(|_| "vault database lock is poisoned".to_owned())?
+                .record_verified_artifact(&VerifiedArtifact {
+                    key_id: signed.key_id.clone(),
+                    manifest: signed.manifest.clone(),
+                    installed_path: destination.to_string_lossy().into_owned(),
+                    signed_manifest_json: request.signed_manifest_json,
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(InstallSignedArtifactResponse {
+                artifact_id: signed.manifest.artifact_id.clone(),
+                installed_path: destination.to_string_lossy().into_owned(),
+                sha256: digest.sha256,
+                byte_size: digest.byte_size,
+            })
+        }
+        .await;
+        if outcome.is_err() {
+            // The directory was created specifically for this immutable
+            // digest. A failed download or encrypted-record write must not
+            // turn into a permanent failed-install marker that blocks retry.
+            let _ = fs::remove_dir_all(&directory);
+        }
+        let task_result = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
+        let _ = sender.send(outcome);
+        task_result
+    });
+    receiver
+        .await
+        .map_err(|_| "signed artifact installation task ended without a result".to_owned())?
+}
+
+/// Official Qdrant Linux artifacts are gzip-compressed tar archives containing
+/// exactly a `qdrant` executable. The archive is already signature/hash
+/// verified by the caller. Extraction occurs inside the digest-specific
+/// directory and accepts only that one regular, non-symlinked payload.
+async fn extract_verified_qdrant_archive(archive: &Path, destination: &Path) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Qdrant artifact destination has no parent directory".to_owned())?;
+    let staging = parent.join("qdrant-extracted");
+    fs::create_dir(&staging).map_err(|error| error.to_string())?;
+    let output = tokio::process::Command::new("tar")
+        .arg("--extract")
+        .arg("--gzip")
+        .arg("--no-same-owner")
+        .arg("--no-same-permissions")
+        .arg("--file")
+        .arg(archive)
+        .arg("--directory")
+        .arg(&staging)
+        .output()
+        .await
+        .map_err(|error| format!("could not start tar to unpack verified Qdrant: {error}"))?;
+    if !output.status.success() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!(
+            "could not unpack verified Qdrant archive: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let entries = fs::read_dir(&staging)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let binary = staging.join("qdrant");
+    let metadata = fs::symlink_metadata(&binary).map_err(|_| {
+        "verified Qdrant archive must contain a regular top-level `qdrant` executable".to_owned()
+    })?;
+    if entries.len() != 1 || !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(
+            "verified Qdrant archive must contain only one regular `qdrant` executable".to_owned(),
+        );
+    }
+    fs::rename(&binary, destination).map_err(|error| error.to_string())?;
+    fs::remove_dir(&staging).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1059,6 +1266,23 @@ async fn configure_hybrid_retrieval(
             .map_err(|error| error.to_string())?;
         (session.database.clone(), session.vault.clone())
     };
+    let qdrant_path = qdrant_executable.to_string_lossy().into_owned();
+    let verified_qdrant = database
+        .lock()
+        .map_err(|_| "vault database lock is poisoned".to_owned())?
+        .verified_artifact_by_installed_path(&qdrant_path)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| {
+            "install a signed, verified Qdrant executable before saving hybrid retrieval settings"
+                .to_owned()
+        })?;
+    if verified_qdrant.manifest.kind != pinky_core::ArtifactKind::Executable
+        || verified_qdrant.manifest.capability != "vector_database"
+    {
+        return Err(
+            "the selected verified artifact is not a Qdrant vector-database executable".to_owned(),
+        );
+    }
     let (sender, receiver) = tokio::sync::oneshot::channel();
     tasks.spawn("hybrid setup", None, move |context| async move {
         let outcome: Result<(), String> = async {
@@ -2491,6 +2715,12 @@ fn open_ambient_window(app: AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            // Release keys are a build-time resource, never UI or environment
+            // input. An invalid resource prevents startup rather than leaving
+            // a partially trusted artifact-onboarding path available.
+            let _trusted_artifact_keys =
+                parse_trusted_artifact_keys_json(TRUSTED_ARTIFACT_KEYS_JSON)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
             let tasks = TaskManager::new();
             let registration_path = app.path().app_config_dir()?.join("vault-registration.json");
             let (registration, registration_error) = if registration_path.exists() {
@@ -2535,6 +2765,7 @@ pub fn run() {
             list_sources,
             list_assets,
             get_hybrid_configuration,
+            install_signed_artifact,
             configure_hybrid_retrieval,
             clear_hybrid_configuration,
             search_sources,

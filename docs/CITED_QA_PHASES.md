@@ -334,8 +334,9 @@ R6 gate:
 ## R7 — retrieval quality upgrade
 
 Status: core contracts, encrypted desktop onboarding, and an opt-in
-session-managed bridge are implemented; signed artifact and live acceptance
-gates remain.
+session-managed bridge are implemented; owner-signed artifact and private-host
+acceptance gates remain. Pinky is personal/small-circle software, not a public
+release channel; its owner controls the signing key and bundles its public key.
 
 - [x] Add a bounded provider-neutral embedding contract and Ollama `/api/embed`
   transport with cancellation, response limits, model identity, and vector
@@ -354,7 +355,8 @@ gates remain.
   starts one supervised Qdrant sidecar per application session, backfills and
   queries hybrid retrieval, reports retrieval phases, and retains lexical
   fallback when the bridge is not configured.
-- [ ] Install and verify the signed embedding model and Qdrant executable.
+- [ ] Install and verify owner-signed embedding/Qdrant artifacts, with the
+  owner's public key bundled in the private build.
 - [ ] Run the retained-chunk backfill against a verified embedding model and
   Qdrant sidecar.
 - [x] Add normal desktop onboarding, persistent encrypted configuration, and
@@ -372,10 +374,12 @@ gates remain.
 - [x] Fail closed when reranked vector neighbours have no meaningful query
   coverage, returning an explicit evidence gap instead of sending unrelated
   passages to cited answer generation.
-- [x] Add a warm reranker p95 smoke test; the target-host one-million-chunk
-  retrieval benchmark remains a release acceptance gate.
-- [ ] Install and verify signed embedding/Qdrant artifacts on the target host,
-  run the retained-chunk backfill, and record warm p95 retrieval below 500 ms.
+- [x] Add a warm reranker p95 smoke test; the private-host one-million-chunk
+  retrieval benchmark remains an owner acceptance gate.
+- [ ] Install and verify owner-signed embedding/Qdrant artifacts on the
+  designated private host, run the retained-chunk backfill, and record warm
+  p95 retrieval below 500 ms. An SSH review is needed only for an SSH model
+  route; direct loopback is recorded as not applicable.
 
 ## R8 — prioritised image support
 
@@ -439,7 +443,7 @@ Planned gates:
   output-file limits, with oversized-input and failed-replacement fixtures.
 - [x] Reopen retained PDF text and citations after a clean database/vault
   restart.
-- [ ] Verify target-host acceptance for interrupted PDF work.
+- [ ] Verify private-host acceptance for interrupted PDF work.
 
 ## Final-stage document compatibility — Office extraction
 
@@ -487,6 +491,6 @@ Implement one phase at a time:
 5. stop for review or a separately requested commit before the next phase.
 
 The current phase gate permits work only on R7 and R9. R10 and later are
-blocked until both phases have all target-host checks recorded as passed in the
+blocked until both phases have all private-host checks recorded as passed in the
 ledger. Passing local unit or fixture tests does not waive an unavailable
-target-host gate.
+private-host gate.

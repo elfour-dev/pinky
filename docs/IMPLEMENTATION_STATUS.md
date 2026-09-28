@@ -6,7 +6,7 @@ See [`ROADMAP.md`](ROADMAP.md) for the ordered plan and entry/exit criteria for
 the remaining milestones.
 
 Phase gate: R7 and R9 are the only active incomplete phases. R10 and later are
-blocked until their remaining target-host acceptance checks pass; no later
+blocked until their remaining private-host acceptance checks pass; no later
 phase feature work should begin while either gate is open.
 
 ## Stage 1 — foundation
@@ -48,7 +48,7 @@ phase feature work should begin while either gate is open.
 - [x] Bounded image-only PDF page rendering and optional local Tesseract OCR
   with page-aware text when `pdftoppm` and Tesseract are installed
 - [ ] Full PDF extraction acceptance (local fixture suite passed on 2026-09-21;
-  interrupted target-host acceptance remains)
+  interrupted private-host acceptance remains)
 - [ ] Office extraction for DOCX, XLSX, PPTX, and ODT (final-stage document
   compatibility milestone)
 - [x] Encrypted Tantivy lexical index and exact retained-version citation viewer
@@ -73,8 +73,8 @@ phase feature work should begin while either gate is open.
 - [x] One-shot cited Q&A over retained lexical evidence with explicit Ask/Search
   modes, cancellable task events, validated claims, warnings, gaps, and exact
   citation reopening
-- [ ] Signed model/Qdrant artifact onboarding, target-host retained-chunk
-  backfill, default hybrid cited chat, and target-host acceptance. Local
+- [ ] Owner-signed model/Qdrant artifact onboarding, private-host retained-chunk
+  backfill, default hybrid cited chat, and private-host acceptance. Local
   one-million-chunk warm retrieval and reranking p95 checks passed on
   2026-09-21.
 - [x] Encrypted persistent conversations with immutable ordered messages,
@@ -147,7 +147,7 @@ and scalar int8 quantization on disk, normalizes vectors, upserts UUID points,
 and queries with authenticated requests that bypass ambient proxies. Reciprocal
 rank fusion uses `k = 60`, deduplicates chunk UUIDs, and caps results at three
 chunks per source version. This is available through the documented opt-in
-bridge; signed artifact onboarding and default user-facing configuration remain
+bridge; owner-signed artifact onboarding and default user-facing configuration remain
 gated before it can become the normal retrieval path.
 
 R7 groundwork now includes a bounded provider-neutral embedding contract, an

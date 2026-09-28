@@ -17,6 +17,7 @@ Planning and resumption documents:
 - [Offline self-development strategy](docs/OFFLINE_SELF_DEVELOPMENT.md)
 - [R6 privacy inspection](docs/PRIVACY_INSPECTION.md)
 - [Signed runtime artifact contract](docs/ARTIFACT_MANIFEST.md)
+- [Development artifact-signing tutorial](docs/ARTIFACT_SIGNING_TUTORIAL.md)
 - [Next-session handoff](docs/NEXT_SESSION.md)
 - [Implementation acceptance ledger](docs/IMPLEMENTATION_STATUS.md)
 
@@ -105,8 +106,9 @@ scripts/install-qdrant-dev.sh
 
 It prints the `PINKY_QDRANT_EXECUTABLE` export for the installed binary. This
 is sufficient for local development validation, but it is deliberately not a
-replacement for the signed artifact manifest and trusted-key onboarding
-required by the R7 release gate.
+replacement for the owner-signed artifact manifest and trusted-key onboarding
+required by the R7 private-host acceptance gate. Pinky is intended for personal
+use and a small trusted circle, rather than public distribution.
 
 The embedding endpoint must be an explicit loopback Ollama endpoint and the
 model must be a locally installed embedding model. Pinky validates the
@@ -296,7 +298,7 @@ cargo test -p pinky-core --test pinky_lite_offline
 
 This uses the bundled Project Alder tutorial sources and a local fixture
 provider; it does not contact Ollama or the public internet. The configured
-Ollama target-host scenario remains an opt-in release check.
+Ollama target-host scenario remains an opt-in private-host acceptance check.
 
 ### Troubleshooting setup
 

@@ -7,7 +7,7 @@ import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
 import { isReconnectableError } from "./reliability";
-import type { AnswerEnvelope, AskQuestionResponse, AssetListResponse, AssetSort, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, HybridConfiguration, RetainedImage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import type { AnswerEnvelope, AskQuestionResponse, AssetListResponse, AssetSort, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, HybridConfiguration, InstallSignedArtifactResponse, RetainedImage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
 import type { EntityState } from "./entity";
 import { canAsk } from "./types";
 
@@ -98,6 +98,7 @@ export function App() {
   const [hybridExecutable, setHybridExecutable] = useState("");
   const [hybridEndpoint, setHybridEndpoint] = useState("http://127.0.0.1:11434");
   const [hybridModel, setHybridModel] = useState("nomic-embed-text");
+  const [signedArtifactManifest, setSignedArtifactManifest] = useState("");
   const [hybridError, setHybridError] = useState("");
   const [hybridRunning, setHybridRunning] = useState(false);
   const [listening, setListening] = useState(false);
@@ -499,6 +500,19 @@ export function App() {
     } catch (error) { setHybridError(String(error)); }
     finally { setHybridRunning(false); }
   };
+  const installSignedArtifact = async () => {
+    setHybridError("");
+    if (!IS_TAURI) { setHybridError("Signed artifact installation is available only in the native application."); return; }
+    if (!signedArtifactManifest.trim()) { setHybridError("Paste the owner-signed Qdrant manifest before installing it."); return; }
+    setHybridRunning(true);
+    try {
+      const installed = await invoke<InstallSignedArtifactResponse>("install_signed_artifact", { request: { signed_manifest_json: signedArtifactManifest.trim() } });
+      setHybridExecutable(installed.installed_path);
+      setSignedArtifactManifest("");
+      setHybridError(`Verified ${installed.artifact_id}; its installed path is ready below.`);
+    } catch (error) { setHybridError(String(error)); }
+    finally { setHybridRunning(false); }
+  };
   const clearHybrid = async () => {
     if (!IS_TAURI) return;
     setHybridError(""); setHybridRunning(true);
@@ -607,10 +621,12 @@ export function App() {
         <header><div><p className="eyebrow">HYBRID RETRIEVAL</p><h2 id="hybrid-title">Configure vector retrieval</h2></div><button aria-label="Close hybrid retrieval settings" disabled={hybridRunning} onClick={closeHybrid}><X size={17} /></button></header>
         <form onSubmit={configureHybrid}>
           <div className="setup-intro"><Settings2 size={21} /><p>Pinky stores these settings inside the encrypted vault, validates the local embedding model, and verifies a supervised Qdrant process before enabling hybrid retrieval.</p></div>
-          <label>Qdrant executable<input value={hybridExecutable} onChange={(event) => setHybridExecutable(event.target.value)} placeholder="/usr/local/bin/qdrant" spellCheck={false} required /></label>
+          <label>Owner-signed Qdrant manifest (optional when already installed)<textarea value={signedArtifactManifest} onChange={(event) => setSignedArtifactManifest(event.target.value)} placeholder={'Paste the complete signed manifest JSON here.\nNever paste a private key.'} spellCheck={false} rows={5} /></label>
+          <button className="artifact-install" type="button" disabled={hybridRunning || !signedArtifactManifest.trim()} onClick={() => void installSignedArtifact()}><ShieldCheck size={13} /> {hybridRunning ? "Installing verified artifact…" : "Install and verify manifest"}</button>
+          <label>Verified Qdrant executable<input value={hybridExecutable} onChange={(event) => setHybridExecutable(event.target.value)} placeholder="Installed by the signed manifest" spellCheck={false} required /></label>
           <label>Embedding Ollama endpoint<input type="url" value={hybridEndpoint} onChange={(event) => setHybridEndpoint(event.target.value)} placeholder="http://127.0.0.1:11434" spellCheck={false} required /></label>
           <label>Installed embedding model<input value={hybridModel} onChange={(event) => setHybridModel(event.target.value)} placeholder="nomic-embed-text" spellCheck={false} required /></label>
-          <p className="source-support">The endpoint must be an explicit IPv4 loopback address. The embedding model must be installed locally, expose the embedding capability, and return a stable vector dimension. Qdrant data remains inside the mounted encrypted vault.</p>
+          <p className="source-support">Paste an owner-signed manifest to install Qdrant; Pinky accepts it only when this private build contains the matching public key. You may not substitute a downloaded executable path. The endpoint must be explicit IPv4 loopback. The embedding model must be installed locally, expose embedding capability, and return a stable vector dimension. Qdrant data remains inside the mounted encrypted vault.</p>
           {hybridError && <p className="setup-error" role="alert">{hybridError}</p>}
           <footer><button type="button" disabled={hybridRunning} onClick={closeHybrid}>Cancel</button>{status.hybrid_configured && <button type="button" disabled={hybridRunning} onClick={() => void clearHybrid()}>Disable hybrid</button>}<button className="primary" disabled={hybridRunning}>{hybridRunning ? "Verifying hybrid runtime…" : "Verify and enable"}</button></footer>
         </form>

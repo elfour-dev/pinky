@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "artifact_id": "qdrant-linux-x86_64-musl-1.19.1",
+  "kind": "executable",
+  "capability": "vector_database",
+  "version": "1.19.1",
+  "url": "https://github.com/qdrant/qdrant/releases/download/v1.19.1/qdrant-x86_64-unknown-linux-musl.tar.gz",
+  "sha256": "70a40529e2ebe0a2787d574d3a2e28437cfe94f26f24fa419f6ac57b4ae817c9",
+  "byte_size": 32315868,
+  "license_url": "https://github.com/qdrant/qdrant/blob/v1.19.1/LICENSE",
+  "runtime_version": "linux-x86_64-musl",
+  "context_length": null,
+  "minimum_ram_bytes": 1073741824
+}

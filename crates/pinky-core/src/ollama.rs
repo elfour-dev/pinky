@@ -43,6 +43,8 @@ pub enum OllamaError {
     UnsupportedModel(String),
     #[error("Ollama model `{0}` is not a local GGUF embedding model")]
     UnsupportedEmbeddingModel(String),
+    #[error("Ollama embedding model `{0}` did not report a valid SHA-256 digest")]
+    InvalidEmbeddingDigest(String),
     #[error("Ollama embedding smoke test failed: {0}")]
     Embedding(#[from] EmbeddingError),
     #[error("Ollama model context is {found} tokens; at least {minimum} are required")]
@@ -61,6 +63,10 @@ pub struct OllamaEmbeddingRuntimeInfo {
     pub model_name: String,
     pub dimensions: usize,
     pub version: String,
+    /// The immutable local model digest returned by Ollama's `/api/tags`.
+    /// R7 onboarding will compare its hexadecimal component with the signed
+    /// embedding-model allowlist before enabling hybrid retrieval.
+    pub digest: String,
 }
 
 #[derive(Clone)]
@@ -107,7 +113,7 @@ impl OllamaClient {
         &self,
         cancellation: &CancellationToken,
     ) -> Result<OllamaRuntimeInfo, OllamaError> {
-        let (version, details) = self.probe_metadata(cancellation).await?;
+        let (version, details, _) = self.probe_metadata(cancellation).await?;
         if !details.details.format.eq_ignore_ascii_case("gguf")
             || !details
                 .capabilities
@@ -146,7 +152,7 @@ impl OllamaClient {
         &self,
         cancellation: &CancellationToken,
     ) -> Result<OllamaEmbeddingRuntimeInfo, OllamaError> {
-        let (version, details) = self.probe_metadata(cancellation).await?;
+        let (version, details, digest) = self.probe_metadata(cancellation).await?;
         if !details.details.format.eq_ignore_ascii_case("gguf")
             || !details
                 .capabilities
@@ -168,17 +174,20 @@ impl OllamaClient {
             .first()
             .map(Vec::len)
             .ok_or(EmbeddingError::InvalidVectors)?;
+        let digest = normalize_embedding_digest(digest.as_deref())
+            .ok_or_else(|| OllamaError::InvalidEmbeddingDigest(self.model_name.clone()))?;
         Ok(OllamaEmbeddingRuntimeInfo {
             model_name: self.model_name.clone(),
             dimensions,
             version: version.version,
+            digest,
         })
     }
 
     async fn probe_metadata(
         &self,
         cancellation: &CancellationToken,
-    ) -> Result<(VersionResponse, ShowResponse), OllamaError> {
+    ) -> Result<(VersionResponse, ShowResponse, Option<String>), OllamaError> {
         let version: VersionResponse = self
             .get_json("api/version", "version", cancellation)
             .await?;
@@ -230,7 +239,7 @@ impl OllamaClient {
         {
             return Err(OllamaError::UnsupportedModel(self.model_name.clone()));
         }
-        Ok((version, details))
+        Ok((version, details, installed.digest.clone()))
     }
 
     pub async fn embed(
@@ -465,6 +474,7 @@ struct TagsResponse {
 struct TaggedModel {
     name: String,
     model: Option<String>,
+    digest: Option<String>,
     remote_model: Option<String>,
     remote_host: Option<String>,
 }
@@ -489,6 +499,14 @@ struct ShowResponse {
 struct ModelDetails {
     format: String,
     context_length: Option<u64>,
+}
+
+fn normalize_embedding_digest(value: Option<&str>) -> Option<String> {
+    let digest = value?.strip_prefix("sha256:")?;
+    (digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !digest.bytes().any(|byte| byte.is_ascii_uppercase()))
+    .then(|| digest.to_owned())
 }
 
 #[derive(Serialize)]
@@ -722,6 +740,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accepts_only_a_lowercase_sha256_ollama_digest() {
+        let valid = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(
+            normalize_embedding_digest(Some(valid)).as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert!(normalize_embedding_digest(None).is_none());
+        assert!(normalize_embedding_digest(Some("sha256:short")).is_none());
+        assert!(normalize_embedding_digest(Some(
+            "sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ))
+        .is_none());
+        assert!(normalize_embedding_digest(Some(
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        ))
+        .is_none());
+    }
+
+    #[test]
     fn accepts_only_exact_ipv4_loopback_origins_and_a_model_name() {
         for endpoint in [
             "https://127.0.0.1:11434",
@@ -786,7 +823,7 @@ mod tests {
                 &listener,
                 "GET",
                 "/api/tags",
-                r#"{"models":[{"name":"nomic-embed-text","model":"nomic-embed-text"}]}"#,
+                r#"{"models":[{"name":"nomic-embed-text","model":"nomic-embed-text","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#,
             );
             respond(
                 &listener,
@@ -819,6 +856,7 @@ mod tests {
                 model_name: "nomic-embed-text".into(),
                 dimensions: 3,
                 version: "0.12.6".into(),
+                digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             }
         );
         server.join().unwrap();

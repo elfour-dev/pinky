@@ -7,10 +7,20 @@ acceptance ledger in [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) is
 the source of truth for individual checks; this document explains the order,
 dependencies, and definition of done for the remaining product milestones.
 
+## Distribution posture
+
+Pinky is a personal application that may be shared with a small trusted circle;
+it is not planned as a public release. Its owner controls the artifact-signing
+private key and builds that contain the corresponding public key. Public key
+hosting, a public package channel, and third-party release operations are out
+of scope. This does not relax integrity requirements: artifacts still require
+an owner-approved bundled public key, a valid signature, HTTPS, and matching
+size and digest before installation.
+
 ## Active phase gate
 
 Only the incomplete R7 and R9 workstreams are active. R10 and every later
-phase are blocked until R7 and R9 have passed their remaining target-host
+phase are blocked until R7 and R9 have passed their remaining private-host
 acceptance checks and the acceptance ledger has been updated. New feature work
 must not be started in a later phase while either active gate is open.
 
@@ -22,8 +32,8 @@ must not be started in a later phase while either active gate is open.
 | Local Ollama cited conversations | Complete | Pinky Lite works offline with a configured local model. |
 | Reliability, cancellation, privacy, and clean-install checks | Complete for Pinky Lite | The remaining SSH process-boundary review is an acceptance task. |
 | Image metadata, retained images, OCR, deletion, and diagnostics | Complete for the retained-image scope | Image generation is not included in this milestone. |
-| Hybrid retrieval | Implemented but release-gated | Local warm retrieval and reranking benchmarks pass; signed artifact onboarding and target-host backfill remain. |
-| PDF extraction | Implemented locally but release-gated | Embedded-text extraction, image-only rendering/OCR, restart recovery, and the fixture suite pass; interrupted target-host acceptance remains. |
+| Hybrid retrieval | Implemented but owner-gated | Local warm retrieval and reranking benchmarks pass; owner-signed artifact onboarding and private-host backfill remain. |
+| PDF extraction | Implemented locally but owner-gated | Embedded-text extraction, image-only rendering/OCR, restart recovery, and the fixture suite pass; interrupted private-host acceptance remains. |
 | Office extraction | Not started | DOCX, XLSX, PPTX, and ODT are deliberately final-stage work. |
 
 The current application can answer from retained local sources when a local
@@ -45,19 +55,21 @@ R8 is complete for the retained local-image scope. It delivered:
 
 Image generation is intentionally not part of R8; it remains the later R13
 creative-tools phase. PDF extraction is implemented locally and remains an
-active target-host acceptance gate, while Office extraction remains the
+active private-host acceptance gate, while Office extraction remains the
 final-stage compatibility phase.
 
 ## Ordered remaining roadmap
 
 ### R7 close — hybrid retrieval and model onboarding
 
-**Status:** implementation and local acceptance are complete; target-host
+**Status:** implementation and local acceptance are complete; private-host
 acceptance remains.
 
 **Deliverables**
 
-- Install and verify signed embedding and Qdrant artifacts.
+- Have the owner sign and install approved Qdrant artifacts, using a public
+  key bundled into the private build. Record the local Ollama embedding
+  model's validated digest.
 - Backfill current retained chunks without rereading original sources; the
   implementation now resumes at the first uncommitted batch and isolates
   collections by embedding identity.
@@ -66,17 +78,19 @@ acceptance remains.
 - Complete managed `llama-server` launch only if the compatibility provider is
   still required; Ollama remains the first supported route.
 
-**Exit gate:** target-host onboarding succeeds, the backfill is restart-safe,
+**Exit gate:** designated private-host onboarding succeeds, the backfill is restart-safe,
 citations remain exact, and warm retrieval over one million chunks is below the
 500 ms p95 target. The local one-million-chunk and reranking warm-p95 checks
-passed on 2026-09-21. Signed artifact installation, verified target-host
-backfill, the target-host benchmark record, and the authenticated SSH
-process-boundary check must still be completed before release claims are made.
+passed on 2026-09-21. Owner-signed artifact installation, verified private-host
+backfill, and the private-host benchmark record must still be completed before
+claiming R7 complete. The SSH process-boundary review is required only when
+the configured model route uses an SSH tunnel; direct loopback use is recorded
+as not applicable.
 
 ### R9 — PDF extraction
 
 **Status:** implementation and local fixture acceptance are complete; only
-interrupted target-host acceptance remains.
+interrupted private-host acceptance remains.
 
 **Deliverables**
 
@@ -95,7 +109,7 @@ interrupted target-host acceptance remains.
 cancelled PDF fixtures pass extraction, indexing, citation, restart, and
 resource-limit tests. Failed replacement indexing leaves the previous version
 searchable. The complete local fixture suite passed on 2026-09-21 (12 tests);
-the target-host interrupted-process demonstration is still required.
+the private-host interrupted-process demonstration is still required.
 
 ### R10 — claims, dossiers, freshness, and evidence quality
 
@@ -206,7 +220,7 @@ citations reopen the retained version and clean-machine tests pass.
   Pinky remains the repository/package working title until then.
 
 **Exit gate:** every version-one acceptance scenario in the specification has a
-passing automated or documented target-host demonstration, with no hidden,
+passing automated or documented private-host demonstration, with no hidden,
 skipped, or unrecorded failures.
 
 ## Dependencies and parallelism
@@ -231,15 +245,18 @@ but their final acceptance belongs to R15.
 Each phase must implement only its stated contract, add focused unit/property
 and fixture tests, run the relevant full Rust and frontend regressions, run
 formatting, Clippy, and `git diff --check`, update the acceptance ledger, and
-record any unavailable target-host gate honestly. A phase is not complete merely
+record any unavailable private-host gate honestly. A phase is not complete merely
 because its UI exists or its code compiles.
 
 ## Immediate next action
 
-1. Close R7: install and verify signed artifacts, run the target-host
-   retained-chunk backfill, record the warm one-million-chunk result, and
-   complete the authenticated SSH process-boundary review.
-2. Close R9: run the interrupted-process PDF acceptance on the target host and
+1. Close R7: choose an owner-controlled artifact-signing key, bundle only its
+   public key in the private build, install and verify owner-signed artifacts,
+   run the private-host retained-chunk backfill, and record the warm
+   one-million-chunk result. Complete the SSH process-boundary review only if
+   the chosen model route uses SSH.
+2. Close R9: run the interrupted-process PDF acceptance on the designated
+   private host and
    confirm no orphan workers or partial artifacts remain.
 3. Re-run the full regression and acceptance gates. Do not start R10 until
    both R7 and R9 are marked complete in the acceptance ledger.
