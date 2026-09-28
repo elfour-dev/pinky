@@ -97,7 +97,7 @@ export function App() {
   const [hybridOpen, setHybridOpen] = useState(false);
   const [hybridExecutable, setHybridExecutable] = useState("");
   const [hybridEndpoint, setHybridEndpoint] = useState("http://127.0.0.1:11434");
-  const [hybridModel, setHybridModel] = useState("nomic-embed-text");
+  const [hybridModel, setHybridModel] = useState("nomic-embed-text:latest");
   const [signedArtifactManifest, setSignedArtifactManifest] = useState("");
   const [hybridError, setHybridError] = useState("");
   const [hybridRunning, setHybridRunning] = useState(false);
@@ -646,7 +646,7 @@ export function App() {
           <button className="artifact-install" type="button" disabled={hybridRunning || !signedArtifactManifest.trim()} onClick={() => void installSignedArtifact()}><ShieldCheck size={13} /> {hybridRunning ? "Installing verified artifact…" : "Install and verify manifest"}</button>
           <label>Verified Qdrant executable<input value={hybridExecutable} onChange={(event) => setHybridExecutable(event.target.value)} placeholder="Installed by the signed manifest" spellCheck={false} required /></label>
           <label>Embedding Ollama endpoint<input type="url" value={hybridEndpoint} onChange={(event) => setHybridEndpoint(event.target.value)} placeholder="http://127.0.0.1:11434" spellCheck={false} required /></label>
-          <label>Installed embedding model<input value={hybridModel} onChange={(event) => setHybridModel(event.target.value)} placeholder="nomic-embed-text" spellCheck={false} required /></label>
+          <label>Installed embedding model<input value={hybridModel} onChange={(event) => setHybridModel(event.target.value)} placeholder="nomic-embed-text:latest" spellCheck={false} required /></label>
           <p className="source-support">Paste an owner-signed manifest to install Qdrant; Pinky accepts it only when this private build contains the matching public key. You may not substitute a downloaded executable path. The endpoint must be explicit IPv4 loopback. The embedding model must be installed locally, expose embedding capability, and return a stable vector dimension. Qdrant data remains inside the mounted encrypted vault.</p>
           {hybridError && <p className="setup-error" role="alert">{hybridError}</p>}
           <footer><button type="button" disabled={hybridRunning} onClick={closeHybrid}>Cancel</button>{status.hybrid_configured && <button type="button" disabled={hybridRunning} onClick={() => void clearHybrid()}>Disable hybrid</button>}<button className="primary" disabled={hybridRunning}>{hybridRunning ? "Verifying hybrid runtime…" : "Verify and enable"}</button></footer>
