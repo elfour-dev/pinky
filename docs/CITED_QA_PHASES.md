@@ -443,7 +443,9 @@ Planned gates:
   output-file limits, with oversized-input and failed-replacement fixtures.
 - [x] Reopen retained PDF text and citations after a clean database/vault
   restart.
-- [ ] Verify private-host acceptance for interrupted PDF work.
+- [x] Verify private-host acceptance for interrupted PDF work. On 2026-09-29,
+  real Poppler extraction of a bounded 6,800-page PDF was interrupted and the
+  vault staging directory was verified clean afterward.
 
 ## Final-stage document compatibility — Office extraction
 
@@ -490,6 +492,6 @@ Implement one phase at a time:
 4. update the acceptance ledger;
 5. stop for review or a separately requested commit before the next phase.
 
-The current phase gate permits work only on R9. R10 and later are blocked until
-its private-host check is recorded as passed in the ledger. Passing local unit
-or fixture tests does not waive an unavailable private-host gate.
+R9 private-host acceptance is recorded as passed. R10 is the next eligible
+phase; passing local unit or fixture tests still does not waive any future
+private-host gate.

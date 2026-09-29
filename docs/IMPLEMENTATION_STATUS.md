@@ -5,9 +5,8 @@ This file is the acceptance ledger for the Pinky implementation specification.
 See [`ROADMAP.md`](ROADMAP.md) for the ordered plan and entry/exit criteria for
 the remaining milestones.
 
-Phase gate: R9 is the only active incomplete phase. R10 and later are blocked
-until its remaining private-host acceptance check passes; no later phase feature
-work should begin while that gate is open.
+Phase gate: R9 private-host acceptance passed on 2026-09-29. R10 is now the
+next eligible development phase; later phases remain ordered by the roadmap.
 
 ## Stage 1 — foundation
 
@@ -47,8 +46,11 @@ work should begin while that gate is open.
   when the Poppler `pdftotext` runtime is installed
 - [x] Bounded image-only PDF page rendering and optional local Tesseract OCR
   with page-aware text when `pdftoppm` and Tesseract are installed
-- [ ] Full PDF extraction acceptance (local fixture suite passed on 2026-09-21;
-  interrupted private-host acceptance remains)
+- [x] Full PDF extraction acceptance. On 2026-09-29 the private-host check
+  used real Poppler (`pdfunite` and `pdftotext`) to start and interrupt a
+  bounded 6,800-page extraction, then verified that no vault staging input or
+  output remained. The malformed, encrypted, oversized, mixed, citation,
+  replacement, and restart fixture checks also pass.
 - [ ] Office extraction for DOCX, XLSX, PPTX, and ODT (final-stage document
   compatibility milestone)
 - [x] Encrypted Tantivy lexical index and exact retained-version citation viewer

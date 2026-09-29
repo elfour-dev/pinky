@@ -19,10 +19,9 @@ size and digest before installation.
 
 ## Active phase gate
 
-Only the incomplete R9 workstream is active. R10 and every later phase are
-blocked until its remaining private-host acceptance check passes and the
-acceptance ledger has been updated. New feature work must not be started in a
-later phase while that gate is open.
+R9 private-host acceptance passed on 2026-09-29. R10 is the next eligible
+workstream; R11 and later remain blocked until the roadmap's preceding phases
+and their acceptance records are complete.
 
 ## Where the project is now
 
@@ -33,7 +32,7 @@ later phase while that gate is open.
 | Reliability, cancellation, privacy, and clean-install checks | Complete for Pinky Lite | The remaining SSH process-boundary review is an acceptance task. |
 | Image metadata, retained images, OCR, deletion, and diagnostics | Complete for the retained-image scope | Image generation is not included in this milestone. |
 | Hybrid retrieval | Complete | Owner-signed Qdrant onboarding, retained-chunk backfill, source-grounded cited Ask/Search, and private-host performance checks passed on 2026-09-29. |
-| PDF extraction | Implemented locally but owner-gated | Embedded-text extraction, image-only rendering/OCR, restart recovery, and the fixture suite pass; interrupted private-host acceptance remains. |
+| PDF extraction | Complete | Embedded-text extraction, image-only rendering/OCR, restart recovery, fixtures, and real-Poppler interrupted private-host acceptance passed on 2026-09-29. |
 | Office extraction | Not started | DOCX, XLSX, PPTX, and ODT are deliberately final-stage work. |
 
 The current application can answer from retained local sources when a local
@@ -87,8 +86,9 @@ process-boundary review is not applicable.
 
 ### R9 — PDF extraction
 
-**Status:** implementation and local fixture acceptance are complete; only
-interrupted private-host acceptance remains.
+**Status:** complete. On 2026-09-29, the real-Poppler private-host acceptance
+check constructed a bounded 6,800-page PDF, interrupted active `pdftotext`
+extraction, and verified that vault staging was clean afterward.
 
 **Deliverables**
 
@@ -103,11 +103,10 @@ interrupted private-host acceptance remains.
   available, recording the page in its citation coordinates.
 - Reopen exact PDF-version citations with page and coordinate information.
 
-**Exit gate:** text, image-only, mixed, malformed, encrypted, oversized, and
-cancelled PDF fixtures pass extraction, indexing, citation, restart, and
-resource-limit tests. Failed replacement indexing leaves the previous version
-searchable. The complete local fixture suite passed on 2026-09-21 (12 tests);
-the private-host interrupted-process demonstration is still required.
+**Exit gate:** passed. Text, image-only, mixed, malformed, encrypted,
+oversized, cancelled, citation, restart, resource-limit, and failed-replacement
+fixtures pass. The private-host interruption check uses the real Poppler worker
+and confirms no staged input or output remains.
 
 ### R10 — claims, dossiers, freshness, and evidence quality
 
@@ -226,7 +225,7 @@ skipped, or unrecorded failures.
 The critical path is:
 
 ```text
-R9 PDF -> R10 evidence -> R11 web research
+R10 evidence -> R11 web research
                               \-> R12 workspaces
                               \-> R13 image generation
 R10/R11/R12/R13 -> R14 Office -> R15 release hardening
@@ -248,11 +247,9 @@ because its UI exists or its code compiles.
 
 ## Immediate next action
 
-1. Close R9: run the interrupted-process PDF acceptance on the designated
-   private host and
-   confirm no orphan workers or partial artifacts remain.
-2. Re-run the full regression and acceptance gates. Do not start R10 until R9
-   is marked complete in the acceptance ledger.
+1. Begin R10 claims, dossiers, freshness, and evidence quality.
+2. Re-run the full regression and acceptance gates before recording R10
+   acceptance.
 
 Office extraction should not be started until the final-stage entry criteria in
 R14 are met.

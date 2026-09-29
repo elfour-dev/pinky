@@ -65,7 +65,8 @@ bounded confidence adjustments and reports the attempted combination when it
 fails. PDF extraction now runs through bounded supervised Poppler workers when
 `pdftotext` and `pdftoppm` are installed; blank/image-only pages can be rendered
 and OCRed with local Tesseract when available, with page-aware citations. The
-full malformed/encrypted/oversized PDF acceptance matrix remains an R9 gate.
+full malformed/encrypted/oversized PDF acceptance matrix, including interrupted
+real-Poppler extraction, has passed for the R9 PDF scope.
 Office extraction is deliberately reserved for a final-stage
 document-compatibility milestone. Image generation, automatic
 research, generated-code containers, backup/restore, and the later release

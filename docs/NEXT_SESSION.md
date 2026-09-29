@@ -104,14 +104,15 @@ The deterministic fake llama-server test needs loopback permission; the
 restricted filesystem sandbox returned `EPERM`, and the same suite passed when
 run with explicit local-loopback permission.
 
-## Next implementation slice: close R9
+## Next implementation slice: begin R10
 
 R7 private-host acceptance passed on 2026-09-29: signed Qdrant onboarding,
 Ollama embedding validation, retained-chunk backfill, source-grounded cited
 Ask/Search, and the one-million-chunk warm retrieval/reranking checks. Direct
-loopback makes the SSH-specific review N/A. Do not begin R10 or later feature
-work. Run the interrupted-process PDF acceptance needed to close R9; only then
-may the next phase be selected.
+loopback makes the SSH-specific review N/A. R9 private-host acceptance also
+passed: a real Poppler worker was interrupted while extracting a bounded
+6,800-page PDF, and vault staging was clean afterward. Begin R10 only after
+reviewing its evidence-quality contract.
 R7 now includes the bounded embedding
 provider/indexer contract, current retained-chunk loading for backfill,
 citation-preserving fusion, a separate Ollama embedding-model probe with a
