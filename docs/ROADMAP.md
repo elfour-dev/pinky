@@ -19,10 +19,10 @@ size and digest before installation.
 
 ## Active phase gate
 
-Only the incomplete R7 and R9 workstreams are active. R10 and every later
-phase are blocked until R7 and R9 have passed their remaining private-host
-acceptance checks and the acceptance ledger has been updated. New feature work
-must not be started in a later phase while either active gate is open.
+Only the incomplete R9 workstream is active. R10 and every later phase are
+blocked until its remaining private-host acceptance check passes and the
+acceptance ledger has been updated. New feature work must not be started in a
+later phase while that gate is open.
 
 ## Where the project is now
 
@@ -32,7 +32,7 @@ must not be started in a later phase while either active gate is open.
 | Local Ollama cited conversations | Complete | Pinky Lite works offline with a configured local model. |
 | Reliability, cancellation, privacy, and clean-install checks | Complete for Pinky Lite | The remaining SSH process-boundary review is an acceptance task. |
 | Image metadata, retained images, OCR, deletion, and diagnostics | Complete for the retained-image scope | Image generation is not included in this milestone. |
-| Hybrid retrieval | Implemented but owner-gated | Local warm retrieval and reranking benchmarks pass; owner-signed artifact onboarding and private-host backfill remain. |
+| Hybrid retrieval | Complete | Owner-signed Qdrant onboarding, retained-chunk backfill, source-grounded cited Ask/Search, and private-host performance checks passed on 2026-09-29. |
 | PDF extraction | Implemented locally but owner-gated | Embedded-text extraction, image-only rendering/OCR, restart recovery, and the fixture suite pass; interrupted private-host acceptance remains. |
 | Office extraction | Not started | DOCX, XLSX, PPTX, and ODT are deliberately final-stage work. |
 
@@ -60,10 +60,14 @@ final-stage compatibility phase.
 
 ## Ordered remaining roadmap
 
-### R7 close — hybrid retrieval and model onboarding
+### R7 — hybrid retrieval and model onboarding
 
-**Status:** implementation and local acceptance are complete; private-host
-acceptance remains.
+**Status:** complete. On 2026-09-29 the owner verified signed Qdrant
+installation through the bundled development public key, the local
+`nomic-embed-text:latest` embedding model, retained-chunk backfill, and
+source-grounded cited Ask/Search. The one-million-chunk warm retrieval and
+warm reranking acceptance tests also passed on the private development host;
+both enforce the required p95 below 500 ms.
 
 **Deliverables**
 
@@ -78,14 +82,8 @@ acceptance remains.
 - Complete managed `llama-server` launch only if the compatibility provider is
   still required; Ollama remains the first supported route.
 
-**Exit gate:** designated private-host onboarding succeeds, the backfill is restart-safe,
-citations remain exact, and warm retrieval over one million chunks is below the
-500 ms p95 target. The local one-million-chunk and reranking warm-p95 checks
-passed on 2026-09-21. Owner-signed artifact installation, verified private-host
-backfill, and the private-host benchmark record must still be completed before
-claiming R7 complete. The SSH process-boundary review is required only when
-the configured model route uses an SSH tunnel; direct loopback use is recorded
-as not applicable.
+**Exit gate:** passed. Direct loopback Ollama is in use, so the SSH
+process-boundary review is not applicable.
 
 ### R9 — PDF extraction
 
@@ -228,7 +226,7 @@ skipped, or unrecorded failures.
 The critical path is:
 
 ```text
-R7 close -> R9 PDF -> R10 evidence -> R11 web research
+R9 PDF -> R10 evidence -> R11 web research
                               \-> R12 workspaces
                               \-> R13 image generation
 R10/R11/R12/R13 -> R14 Office -> R15 release hardening
@@ -250,16 +248,11 @@ because its UI exists or its code compiles.
 
 ## Immediate next action
 
-1. Close R7: choose an owner-controlled artifact-signing key, bundle only its
-   public key in the private build, install and verify owner-signed artifacts,
-   run the private-host retained-chunk backfill, and record the warm
-   one-million-chunk result. Complete the SSH process-boundary review only if
-   the chosen model route uses SSH.
-2. Close R9: run the interrupted-process PDF acceptance on the designated
+1. Close R9: run the interrupted-process PDF acceptance on the designated
    private host and
    confirm no orphan workers or partial artifacts remain.
-3. Re-run the full regression and acceptance gates. Do not start R10 until
-   both R7 and R9 are marked complete in the acceptance ledger.
+2. Re-run the full regression and acceptance gates. Do not start R10 until R9
+   is marked complete in the acceptance ledger.
 
 Office extraction should not be started until the final-stage entry criteria in
 R14 are met.

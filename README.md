@@ -87,8 +87,8 @@ Hybrid retrieval remains dormant by default until a local Qdrant executable and
 embedding model are explicitly configured; Pinky does not generate substitute
 embeddings.
 
-There is an opt-in R7 desktop bridge for development validation. Set all three
-values before launching Pinky to enable hybrid retrieval in Ask and Search:
+Hybrid retrieval is an opt-in private desktop configuration. Set all three
+values before launching Pinky to enable it in Ask and Search:
 
 ```bash
 export PINKY_QDRANT_EXECUTABLE=/absolute/path/to/qdrant

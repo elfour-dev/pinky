@@ -333,10 +333,10 @@ R6 gate:
 
 ## R7 — retrieval quality upgrade
 
-Status: core contracts, encrypted desktop onboarding, and an opt-in
-session-managed bridge are implemented; owner-signed artifact and private-host
-acceptance gates remain. Pinky is personal/small-circle software, not a public
-release channel; its owner controls the signing key and bundles its public key.
+Status: complete. Pinky is personal/small-circle software, not a public release
+channel; its owner controls the signing key and bundles its public key. On
+2026-09-29 the owner completed signed-artifact onboarding, retained-chunk
+backfill, and source-grounded cited Ask/Search through local-loopback Ollama.
 
 - [x] Add a bounded provider-neutral embedding contract and Ollama `/api/embed`
   transport with cancellation, response limits, model identity, and vector
@@ -355,9 +355,9 @@ release channel; its owner controls the signing key and bundles its public key.
   starts one supervised Qdrant sidecar per application session, backfills and
   queries hybrid retrieval, reports retrieval phases, and retains lexical
   fallback when the bridge is not configured.
-- [ ] Install and verify owner-signed embedding/Qdrant artifacts, with the
+- [x] Install and verify owner-signed embedding/Qdrant artifacts, with the
   owner's public key bundled in the private build.
-- [ ] Run the retained-chunk backfill against a verified embedding model and
+- [x] Run the retained-chunk backfill against a verified embedding model and
   Qdrant sidecar.
 - [x] Add normal desktop onboarding, persistent encrypted configuration, and
   idle-managed sidecar shutdown.
@@ -376,10 +376,10 @@ release channel; its owner controls the signing key and bundles its public key.
   passages to cited answer generation.
 - [x] Add a warm reranker p95 smoke test; the private-host one-million-chunk
   retrieval benchmark remains an owner acceptance gate.
-- [ ] Install and verify owner-signed embedding/Qdrant artifacts on the
+- [x] Install and verify owner-signed embedding/Qdrant artifacts on the
   designated private host, run the retained-chunk backfill, and record warm
-  p95 retrieval below 500 ms. An SSH review is needed only for an SSH model
-  route; direct loopback is recorded as not applicable.
+  retrieval and reranking p95 below 500 ms. The 2026-09-29 private-host checks
+  passed; direct loopback is in use, so SSH review is not applicable.
 
 ## R8 — prioritised image support
 
@@ -490,7 +490,6 @@ Implement one phase at a time:
 4. update the acceptance ledger;
 5. stop for review or a separately requested commit before the next phase.
 
-The current phase gate permits work only on R7 and R9. R10 and later are
-blocked until both phases have all private-host checks recorded as passed in the
-ledger. Passing local unit or fixture tests does not waive an unavailable
-private-host gate.
+The current phase gate permits work only on R9. R10 and later are blocked until
+its private-host check is recorded as passed in the ledger. Passing local unit
+or fixture tests does not waive an unavailable private-host gate.

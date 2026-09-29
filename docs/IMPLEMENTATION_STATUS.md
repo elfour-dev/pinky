@@ -5,9 +5,9 @@ This file is the acceptance ledger for the Pinky implementation specification.
 See [`ROADMAP.md`](ROADMAP.md) for the ordered plan and entry/exit criteria for
 the remaining milestones.
 
-Phase gate: R7 and R9 are the only active incomplete phases. R10 and later are
-blocked until their remaining private-host acceptance checks pass; no later
-phase feature work should begin while either gate is open.
+Phase gate: R9 is the only active incomplete phase. R10 and later are blocked
+until its remaining private-host acceptance check passes; no later phase feature
+work should begin while that gate is open.
 
 ## Stage 1 — foundation
 
@@ -73,10 +73,13 @@ phase feature work should begin while either gate is open.
 - [x] One-shot cited Q&A over retained lexical evidence with explicit Ask/Search
   modes, cancellable task events, validated claims, warnings, gaps, and exact
   citation reopening
-- [ ] Owner-signed model/Qdrant artifact onboarding, private-host retained-chunk
-  backfill, default hybrid cited chat, and private-host acceptance. Local
-  one-million-chunk warm retrieval and reranking p95 checks passed on
-  2026-09-21.
+- [x] Owner-signed model/Qdrant artifact onboarding, private-host retained-chunk
+  backfill, default hybrid cited chat, and private-host acceptance. On
+  2026-09-29 the owner verified the bundled development signing key, the
+  signed Qdrant installation, the local `nomic-embed-text:latest` Ollama
+  embedding model, and source-grounded Ask/Search with exact citations. The
+  one-million-chunk warm retrieval and warm reranking acceptance checks passed
+  on the private development host; each enforces a p95 below 500 ms.
 - [x] Encrypted persistent conversations with immutable ordered messages,
   bounded history, validated-answer persistence, and create/select/rename/delete
   desktop interactions

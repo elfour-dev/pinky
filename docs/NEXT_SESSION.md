@@ -104,14 +104,14 @@ The deterministic fake llama-server test needs loopback permission; the
 restricted filesystem sandbox returned `EPERM`, and the same suite passed when
 run with explicit local-loopback permission.
 
-## Next implementation slice: close R7, then close R9
+## Next implementation slice: close R9
 
-Do not begin R10 or any later feature work. First close the remaining R7
-private-host acceptance checks (owner-signed artifact installation, retained-chunk
-backfill, and warm benchmark). The SSH-specific process-boundary review is
-required only if the configured model route uses SSH; direct loopback is N/A.
-After R7 is closed, run the interrupted-process PDF acceptance needed to close
-R9. Only then may the next phase be selected.
+R7 private-host acceptance passed on 2026-09-29: signed Qdrant onboarding,
+Ollama embedding validation, retained-chunk backfill, source-grounded cited
+Ask/Search, and the one-million-chunk warm retrieval/reranking checks. Direct
+loopback makes the SSH-specific review N/A. Do not begin R10 or later feature
+work. Run the interrupted-process PDF acceptance needed to close R9; only then
+may the next phase be selected.
 R7 now includes the bounded embedding
 provider/indexer contract, current retained-chunk loading for backfill,
 citation-preserving fusion, a separate Ollama embedding-model probe with a
@@ -129,10 +129,9 @@ downloads with redirects rejected, and atomic installation. The core reranker
 now bounds hybrid selection to 30 fused candidates and 12 returned citations.
 Use `docs/PRIVACY_INSPECTION.md` for the scanner command and run
 the ignored live test with `PINKY_OLLAMA_ENDPOINT` and
-`PINKY_OLLAMA_MODEL` set. The remaining R7 owner gate is private-host
-onboarding/backfill with an owner-signed verified Qdrant executable and
-embedding model,
-followed by the one-million-chunk warm p95 measurement.
+`PINKY_OLLAMA_MODEL` set. R7 private-host onboarding/backfill is complete with
+an owner-signed verified Qdrant executable and embedding model; the
+one-million-chunk warm retrieval and reranking checks passed on 2026-09-29.
 
 Product priority change: R8 image metadata ingestion is implemented for PNG,
 JPEG, WebP, GIF, and TIFF. A bounded supervised OCR worker now keeps its
