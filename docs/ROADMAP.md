@@ -287,9 +287,10 @@ because its UI exists or its code compiles.
 
 ## Immediate next action
 
-1. Begin R10 claims, dossiers, freshness, and evidence quality.
-2. Re-run the full regression and acceptance gates before recording R10
-   acceptance.
+1. Begin R11 public-web research and safe refresh only against its explicit
+   permission, budget, and safety exit gate.
+2. Preserve R10's completed, fixed acceptance criteria while building the R11
+   boundary.
 
 Office extraction should not be started until the final-stage entry criteria in
 R14 are met.

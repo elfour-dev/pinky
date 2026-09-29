@@ -23,7 +23,9 @@ Planning and resumption documents:
 
 ## Current milestone
 
-The executable stage-one foundation currently includes:
+R10 — claims, dossiers, freshness, and evidence quality — is complete. R11
+public-web research and safe refresh is the next eligible phase; Pinky does not
+yet fetch public-web content. The executable currently includes:
 
 - a Tauri 2 / React / TypeScript desktop shell with no externally reachable HTTP API;
 - a Rust core whose persistence APIs require a verified gocryptfs mount;
@@ -47,6 +49,16 @@ The executable stage-one foundation currently includes:
   source search, and exact retained-version citation reopening;
 - a three-region UI, live xterm event log, task controls, and a Three.js entity
   driven by task state, including reduced motion and a non-WebGL fallback.
+- retained-evidence-only claim extraction: local models can select only indexes
+  from a fixed evidence set, while Pinky regenerates and reopens canonical
+  citations before retaining claims, entities, aliases, or relationships;
+- evidence-quality dossiers with persisted coverage, authority, independence,
+  freshness, and unresolved-question scores; supporting and contradicting
+  evidence stay visible together;
+- derived disputed, stale, single-source, and inferred warnings, explicit
+  unresolved-question management, review/correction capture, and a durable,
+  bounded stale-source refresh queue. This queue only selects work for R11; it
+  never fetches network content and excludes filesystem-event sources.
 
 Live core acceptance now covers real gocryptfs creation, Secret Service key
 storage, unmounting, restart-time unlocking, and encrypted object recovery on
@@ -67,9 +79,13 @@ fails. PDF extraction now runs through bounded supervised Poppler workers when
 and OCRed with local Tesseract when available, with page-aware citations. The
 full malformed/encrypted/oversized PDF acceptance matrix, including interrupted
 real-Poppler extraction, has passed for the R9 PDF scope.
+R10 evidence-quality acceptance has also passed: extraction is source-grounded,
+contradictions are preserved, and topic dossiers are available from the
+**Evidence quality** area of the desktop application. R11 web research and its
+public-network permission boundary remain unimplemented.
 Office extraction is deliberately reserved for a final-stage
 document-compatibility milestone. Image generation, automatic
-research, generated-code containers, backup/restore, and the later release
+research execution, generated-code containers, backup/restore, and the later release
 gates remain unimplemented.
 Retained-data operations
 remain disabled while the vault is unavailable.
@@ -126,7 +142,7 @@ executable before storing their paths and names inside the encrypted SQLCipher
 database. The environment variables remain useful for development-only
 fallbacks and do not override a saved vault configuration.
 
-The in-progress cited-Q&A milestone now attaches either an existing local
+The cited local Q&A path attaches either an existing local
 Ollama instance or an authenticated llama.cpp server. After vault unlock, open
 **Attach local model** and select the provider:
 
