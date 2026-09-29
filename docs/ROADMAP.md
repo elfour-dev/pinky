@@ -7,6 +7,19 @@ acceptance ledger in [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) is
 the source of truth for individual checks; this document explains the order,
 dependencies, and definition of done for the remaining product milestones.
 
+## Acceptance-criteria lock
+
+Each milestone's **Deliverables** and **Exit gate** are fixed acceptance
+criteria. During development, implementation work may add tests, record
+verification evidence, and change an acceptance status only after every stated
+criterion has passed. It must not weaken, remove, reinterpret, reorder, or
+otherwise change these criteria to make a milestone easier to complete.
+
+Only an explicit user-directed product-scope change may revise a criterion.
+Such a revision must be recorded as a separate scope decision with its reason
+and date; it must never be presented as an implementation update or used to
+retroactively justify completion.
+
 ## Distribution posture
 
 Pinky is a personal application that may be shared with a small trusted circle;
@@ -19,9 +32,8 @@ size and digest before installation.
 
 ## Active phase gate
 
-R9 private-host acceptance passed on 2026-09-29. R10 is the next eligible
-workstream; R11 and later remain blocked until the roadmap's preceding phases
-and their acceptance records are complete.
+R10 completed against its fixed exit gate on 2026-09-29. R11 is now the next
+eligible workstream; later phases remain ordered by the roadmap.
 
 ## Where the project is now
 
@@ -110,7 +122,8 @@ and confirms no staged input or output remains.
 
 ### R10 — claims, dossiers, freshness, and evidence quality
 
-**Status:** not started.
+**Status:** complete. The fixed exit gate below was verified on 2026-09-29;
+the acceptance criteria remain the definition of completion.
 
 **Deliverables**
 
@@ -121,9 +134,36 @@ and confirms no staged input or output remains.
 - Classify source freshness and schedule bounded refreshes for stale sources.
 - Add warnings for disputed, stale, single-source, and inferred statements.
 
-**Exit gate:** deterministic fixtures prove claim status transitions,
-contradiction preservation, dossier consolidation, coverage calculation, and
-freshness scheduling without allowing model output to create unsupported facts.
+**Exit gate:** all of the following pass before this phase may be marked
+complete:
+
+- A bounded extraction workflow accepts only evidence indexes from a fixed
+  retained-evidence set. It maps indexes to canonical citations itself, rejects
+  unknown/duplicate/out-of-range indexes, and cannot accept model-provided
+  citation URIs or chunk IDs.
+- Extraction creates source-grounded claims, entities, aliases, and
+  relationships. Fixtures cover direct, inferred, and disputed claims, aliases,
+  multiple independent sources, and invalid/unsupported extraction output.
+- Automatic direct claims use a bounded, typed claim grammar with deterministic
+  passage-match rules. A model proposal outside those supported patterns is
+  retained only as a labeled `inferred` claim pending explicit user confirmation;
+  unsupported or unrelated cited passages must not create a direct claim.
+- Dossiers persist and present coverage, authority, independence, freshness,
+  and unresolved-question scores. Unresolved questions are extracted or
+  explicitly user-managed, not synthesized only from a conflict count.
+- Supporting and contradicting evidence remain queryable and visible together;
+  conflicts never overwrite prior evidence.
+- Freshness classification and a bounded, durable refresh schedule survive
+  restart, deduplicate sources, retain retry/next-due state, and never schedule
+  filesystem-event sources for network refresh. R11 alone executes public-web
+  refreshes under its permission and budget boundary.
+- Claim-level warnings for disputed, stale, single-source, and inferred claims
+  are derived from persisted evidence and shown in the desktop workflow.
+- Desktop acceptance covers extraction, review/correction, dossier display,
+  warnings, refresh eligibility, cancellation, and restart recovery.
+- Deterministic fixtures cover every status transition, contradiction
+  preservation, dossier consolidation, scores, durable freshness scheduling,
+  cancellation/restart, and model attempts to create unsupported facts.
 
 ### R11 — public-web research and safe refresh
 

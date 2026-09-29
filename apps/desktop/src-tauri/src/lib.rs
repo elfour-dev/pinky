@@ -6,18 +6,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::Utc;
 use pinky_core::{
-    answer_question_with_history, create_registered_vault, parse_trusted_artifact_keys_json,
-    read_registration, unlock_registered_vault, AnswerEnvelopeV1, AssetListQuery,
-    AssetListResponse, CitationPassage, ClaimSupportV1, ConversationDetail, ConversationService,
-    ConversationSummary, ConversationTurnV1, EmbeddingIndexer, GocryptfsMount, HybridConfiguration,
-    ImageOcrWorker, InferenceError, InferenceFuture, InferenceProvider, LlamaClient, LlamaError,
-    LocalFileFingerprint, LocalIngestor, LocalWatchTarget, MessageDraft, ObjectStore, OllamaClient,
-    OllamaConfiguration, OllamaError, OllamaRuntimeInfo, OnboardedVault, PdfTextExtractor, QaError,
-    QdrantLaunchConfig, QdrantSidecar, RetainedImage, RetrievalService, SearchHit,
-    SignedArtifactManifestV1, SourceSummary, StructuredGenerationRequest, SystemVaultPlatform,
-    TaskContext, TaskJournal, TaskManager, Vault, VaultPaths, VaultRegistration, VerifiedArtifact,
-    AUTO_OCR_CONFIDENCE_THRESHOLDS, AUTO_OCR_PAGE_SEGMENTATION_MODES, DEFAULT_OCR_MIN_CONFIDENCE,
+    answer_question_with_history, create_registered_vault, extract_retained_claims,
+    parse_trusted_artifact_keys_json, read_registration, unlock_registered_vault, AnswerEnvelopeV1,
+    AssetListQuery, AssetListResponse, CitationPassage, ClaimDraftV1, ClaimStore, ClaimSupportV1,
+    ConversationDetail, ConversationService, ConversationSummary, ConversationTurnV1,
+    EmbeddingIndexer, GocryptfsMount, HybridConfiguration, ImageOcrWorker, InferenceError,
+    InferenceFuture, InferenceProvider, LlamaClient, LlamaError, LocalFileFingerprint,
+    LocalIngestor, LocalWatchTarget, MessageDraft, ObjectStore, OllamaClient, OllamaConfiguration,
+    OllamaError, OllamaRuntimeInfo, OnboardedVault, PdfTextExtractor, PersistedClaim, QaError,
+    QdrantLaunchConfig, QdrantSidecar, RefreshScheduleV1, RetainedImage, RetrievalService,
+    SearchHit, SignedArtifactManifestV1, SourceSummary, StructuredGenerationRequest,
+    SystemVaultPlatform, TaskContext, TaskJournal, TaskManager, TopicDossierV1, Vault, VaultPaths,
+    VaultRegistration, VerifiedArtifact, AUTO_OCR_CONFIDENCE_THRESHOLDS,
+    AUTO_OCR_PAGE_SEGMENTATION_MODES, DEFAULT_OCR_MIN_CONFIDENCE,
     DEFAULT_OCR_PAGE_SEGMENTATION_MODE,
 };
 use serde::{Deserialize, Serialize};
@@ -213,6 +216,12 @@ struct ConfigureHybridRequest {
     qdrant_executable: PathBuf,
     embedding_endpoint: String,
     embedding_model: String,
+}
+
+#[derive(Deserialize)]
+struct ExtractClaimsRequest {
+    topic: String,
+    query: String,
 }
 
 #[derive(Deserialize)]
@@ -936,6 +945,22 @@ fn retrieval_service(runtime: &AppRuntime) -> Result<RetrievalService, String> {
         vault.database.clone(),
         ObjectStore::new(vault.vault.clone()),
     ))
+}
+
+fn claim_store(runtime: &AppRuntime) -> Result<ClaimStore, String> {
+    let data = runtime
+        .data
+        .lock()
+        .map_err(|_| "runtime lock is poisoned".to_owned())?;
+    let vault = data
+        .vault
+        .as_ref()
+        .ok_or_else(|| "the encrypted vault is not unlocked".to_owned())?;
+    vault
+        .vault
+        .ensure_mounted()
+        .map_err(|error| error.to_string())?;
+    Ok(ClaimStore::new(vault.database.clone()))
 }
 
 fn hybrid_search_config(runtime: &AppRuntime) -> Result<Option<HybridSearchConfig>, String> {
@@ -2281,6 +2306,147 @@ fn list_assets(
         .map_err(|error| error.to_string())
 }
 
+/// A caller may propose structured extraction, but every cited passage is
+/// reopened from the encrypted corpus before the claim can be persisted.
+#[tauri::command]
+fn record_source_grounded_claim(
+    claim: ClaimDraftV1,
+    runtime: State<'_, AppRuntime>,
+) -> Result<PersistedClaim, String> {
+    let retrieval = retrieval_service(runtime.inner())?;
+    claim_store(runtime.inner())?
+        .record_from_retrieval(&claim, &retrieval)
+        .map_err(|error| error.to_string())
+}
+
+/// Run bounded local-model extraction over a fresh, fixed retained-evidence
+/// set.  The model is only allowed to return indexes; Pinky maps those indexes
+/// back to citations and reopens each passage before storing a claim.
+#[tauri::command]
+async fn extract_source_grounded_claims(
+    request: ExtractClaimsRequest,
+    runtime: State<'_, AppRuntime>,
+    tasks: State<'_, TaskManager>,
+) -> Result<Vec<PersistedClaim>, String> {
+    if request.topic.trim().is_empty() || request.query.trim().is_empty() {
+        return Err("enter both a topic and an evidence search query".to_owned());
+    }
+    let (retrieval, store, provider) = {
+        let data = runtime
+            .data
+            .lock()
+            .map_err(|_| "runtime lock is poisoned".to_owned())?;
+        let vault = data
+            .vault
+            .as_ref()
+            .ok_or_else(|| "unlock the encrypted vault before extracting claims".to_owned())?;
+        vault
+            .vault
+            .ensure_mounted()
+            .map_err(|error| error.to_string())?;
+        let model = data
+            .attached_model
+            .as_ref()
+            .ok_or_else(|| "attach a local model before extracting claims".to_owned())?;
+        (
+            RetrievalService::new(
+                vault.database.clone(),
+                ObjectStore::new(vault.vault.clone()),
+            ),
+            ClaimStore::new(vault.database.clone()),
+            model.client.clone(),
+        )
+    };
+    let topic = request.topic.trim().to_owned();
+    let query = request.query.trim().to_owned();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tasks.spawn("claim extraction", None, move |mut context| async move {
+        let outcome: Result<Vec<PersistedClaim>, String> = async {
+            context
+                .checkpoint()
+                .await
+                .map_err(|_| "cancelled".to_owned())?;
+            context.progress(
+                "claim extraction",
+                Some(0.15),
+                "Selecting retained evidence",
+            );
+            context.progress(
+                "claim extraction",
+                Some(0.5),
+                "Extracting indexed claim proposals locally",
+            );
+            let stored = extract_retained_claims(
+                &provider,
+                &store,
+                &retrieval,
+                &topic,
+                &query,
+                &context.cancellation_token(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            context.progress(
+                "claim extraction",
+                Some(0.95),
+                format!("Retained {} source-grounded claims", stored.len()),
+            );
+            Ok(stored)
+        }
+        .await;
+        let result = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
+        let _ = sender.send(outcome);
+        result
+    });
+    receiver
+        .await
+        .map_err(|_| "claim extraction task ended without a result".to_owned())?
+}
+
+#[tauri::command]
+fn topic_dossier(
+    topic_id: String,
+    runtime: State<'_, AppRuntime>,
+) -> Result<TopicDossierV1, String> {
+    let topic_id = Uuid::parse_str(&topic_id).map_err(|_| "invalid topic ID".to_owned())?;
+    claim_store(runtime.inner())?
+        .dossier(topic_id, Utc::now())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_topic_dossiers(runtime: State<'_, AppRuntime>) -> Result<Vec<TopicDossierV1>, String> {
+    claim_store(runtime.inner())?
+        .dossiers(Utc::now())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_topic_unresolved_questions(
+    topic_id: String,
+    questions: Vec<String>,
+    runtime: State<'_, AppRuntime>,
+) -> Result<(), String> {
+    let topic_id = Uuid::parse_str(&topic_id).map_err(|_| "invalid topic ID".to_owned())?;
+    claim_store(runtime.inner())?
+        .set_unresolved_questions(topic_id, &questions)
+        .map_err(|error| error.to_string())
+}
+
+/// R10 selects work only. The R11 public-web boundary owns fetching it.
+#[tauri::command]
+fn due_source_refreshes(
+    limit: Option<usize>,
+    runtime: State<'_, AppRuntime>,
+) -> Result<RefreshScheduleV1, String> {
+    claim_store(runtime.inner())?
+        .schedule_due_refreshes(
+            Utc::now(),
+            limit.unwrap_or(pinky_core::MAX_DOSSIER_REFRESHES),
+        )
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn search_sources(
     query: String,
@@ -2842,6 +3008,12 @@ pub fn run() {
             delete_image_ocr_chunk,
             list_sources,
             list_assets,
+            record_source_grounded_claim,
+            extract_source_grounded_claims,
+            topic_dossier,
+            list_topic_dossiers,
+            set_topic_unresolved_questions,
+            due_source_refreshes,
             get_hybrid_configuration,
             install_signed_artifact,
             configure_hybrid_retrieval,

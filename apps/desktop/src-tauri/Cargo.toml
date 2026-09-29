@@ -12,6 +12,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.4", features = [] }
 
 [dependencies]
+chrono.workspace = true
 pinky-core = { path = "../../../crates/pinky-core" }
 serde.workspace = true
 tokio.workspace = true

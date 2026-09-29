@@ -2685,6 +2685,7 @@ dependencies = [
 name = "pinky-desktop"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "pinky-core",
  "serde",
  "tauri",

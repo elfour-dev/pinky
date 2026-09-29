@@ -6,13 +6,17 @@ use zeroize::Zeroizing;
 
 use crate::{ArtifactKind, ArtifactManifestV1, Vault, VaultError};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 10;
 const MIGRATION_001: &str = include_str!("../migrations/001_initial.sql");
 const MIGRATION_002: &str = include_str!("../migrations/002_hybrid_configuration.sql");
 const MIGRATION_003: &str = include_str!("../migrations/003_asset_indexes.sql");
 const MIGRATION_004: &str = include_str!("../migrations/004_ollama_configuration.sql");
 const MIGRATION_005: &str = include_str!("../migrations/005_verified_artifacts.sql");
 const MIGRATION_006: &str = include_str!("../migrations/006_source_watch_controls.sql");
+const MIGRATION_007: &str = include_str!("../migrations/007_claim_dossiers.sql");
+const MIGRATION_008: &str = include_str!("../migrations/008_claim_inference.sql");
+const MIGRATION_009: &str = include_str!("../migrations/009_refresh_schedule.sql");
+const MIGRATION_010: &str = include_str!("../migrations/010_dossier_scores.sql");
 
 #[derive(Debug, Error)]
 pub enum DatabaseError {
@@ -94,6 +98,10 @@ impl Database {
             connection.execute_batch(MIGRATION_004)?;
             connection.execute_batch(MIGRATION_005)?;
             connection.execute_batch(MIGRATION_006)?;
+            connection.execute_batch(MIGRATION_007)?;
+            connection.execute_batch(MIGRATION_008)?;
+            connection.execute_batch(MIGRATION_009)?;
+            apply_dossier_score_migration(&connection)?;
         } else {
             if version < 2 {
                 connection.execute_batch(MIGRATION_002)?;
@@ -108,7 +116,24 @@ impl Database {
                 connection.execute_batch(MIGRATION_005)?;
             }
             if version < 6 {
-                connection.execute_batch(MIGRATION_006)?;
+                // Older development builds could have the column while their
+                // user_version lagged. Treat the schema as the authority so a
+                // recovery/open never fails on an otherwise usable vault.
+                if !table_has_column(&connection, "sources", "watch_paused")? {
+                    connection.execute_batch(MIGRATION_006)?;
+                }
+            }
+            if version < 7 {
+                connection.execute_batch(MIGRATION_007)?;
+            }
+            if version < 8 && !table_has_column(&connection, "claims", "inferred")? {
+                connection.execute_batch(MIGRATION_008)?;
+            }
+            if version < 9 {
+                connection.execute_batch(MIGRATION_009)?;
+            }
+            if version < 10 {
+                apply_dossier_score_migration(&connection)?;
             }
         }
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -355,6 +380,53 @@ impl Database {
             Err(error) => Err(DatabaseError::Sql(error)),
         }
     }
+}
+
+fn table_has_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, DatabaseError> {
+    let mut statement =
+        connection.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2 LIMIT 1")?;
+    Ok(statement.exists([table, column])?)
+}
+
+/// Development vaults can have a schema-version marker that lagged behind a
+/// previously applied column change.  Apply the score migration atomically
+/// when untouched, and otherwise fill only the missing columns.
+fn apply_dossier_score_migration(connection: &Connection) -> Result<(), DatabaseError> {
+    let columns = [
+        (
+            "authority_score",
+            "REAL NOT NULL DEFAULT 0 CHECK(authority_score BETWEEN 0 AND 100)",
+        ),
+        (
+            "independence_score",
+            "REAL NOT NULL DEFAULT 0 CHECK(independence_score BETWEEN 0 AND 100)",
+        ),
+        (
+            "freshness_score",
+            "REAL NOT NULL DEFAULT 0 CHECK(freshness_score BETWEEN 0 AND 100)",
+        ),
+        (
+            "unresolved_question_score",
+            "REAL NOT NULL DEFAULT 0 CHECK(unresolved_question_score BETWEEN 0 AND 100)",
+        ),
+    ];
+    let all_missing = columns.iter().try_fold(true, |all_missing, (column, _)| {
+        Ok::<_, DatabaseError>(all_missing && !table_has_column(connection, "topics", column)?)
+    })?;
+    if all_missing {
+        connection.execute_batch(MIGRATION_010)?;
+        return Ok(());
+    }
+    for (column, definition) in columns {
+        if !table_has_column(connection, "topics", column)? {
+            connection.execute(&format!("ALTER TABLE topics ADD COLUMN {column} {definition}"), [])?;
+        }
+    }
+    Ok(())
 }
 
 fn artifact_kind_name(kind: ArtifactKind) -> &'static str {

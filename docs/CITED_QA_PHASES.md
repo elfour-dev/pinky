@@ -492,6 +492,6 @@ Implement one phase at a time:
 4. update the acceptance ledger;
 5. stop for review or a separately requested commit before the next phase.
 
-R9 private-host acceptance is recorded as passed. R10 is the next eligible
-phase; passing local unit or fixture tests still does not waive any future
-private-host gate.
+R10 completed on 2026-09-29 against its explicit roadmap acceptance criteria.
+R11 is now eligible, but passing local unit or fixture tests still does not
+waive any future private-host gate.

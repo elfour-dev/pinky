@@ -7,7 +7,7 @@ import { AsciiEntity } from "./AsciiEntity";
 import { deriveEntityState } from "./entity";
 import { mergeTaskEvents } from "./events";
 import { isReconnectableError } from "./reliability";
-import type { AnswerEnvelope, AskQuestionResponse, AssetListResponse, AssetSort, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, HybridConfiguration, InstallSignedArtifactResponse, RetainedImage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, VaultPaths } from "./types";
+import type { AnswerEnvelope, AskQuestionResponse, AssetListResponse, AssetSort, AttachLlamaResponse, CitationPassage, ConversationDetail, ConversationMessage, ConversationSummary, HybridConfiguration, InstallSignedArtifactResponse, RefreshSchedule, RetainedImage, RuntimeStatus, SearchHit, SetupVaultResponse, SourceSummary, TaskEvent, TopicDossier, VaultPaths } from "./types";
 import type { EntityState } from "./entity";
 import { canAsk } from "./types";
 
@@ -46,7 +46,9 @@ export function App() {
   const [status, setStatus] = useState(EMPTY_STATUS);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [sources, setSources] = useState<SourceSummary[]>([]);
-  const [activeView, setActiveView] = useState<"conversation" | "assets">("conversation");
+  const [activeView, setActiveView] = useState<"conversation" | "assets" | "dossiers">("conversation");
+  const [dossiers, setDossiers] = useState<TopicDossier[]>([]);
+  const [dossierError, setDossierError] = useState("");
   const [assetCount, setAssetCount] = useState(0);
   const [assetRefreshKey, setAssetRefreshKey] = useState(0);
   const [message, setMessage] = useState("");
@@ -176,6 +178,12 @@ export function App() {
   };
   const openConversation = () => {
     setActiveView("conversation");
+  };
+  const openDossiers = async () => {
+    invalidateAskView(); setActiveView("dossiers"); setDossierError("");
+    if (!IS_TAURI) return;
+    try { setDossiers(await invoke<TopicDossier[]>("list_topic_dossiers")); }
+    catch (error) { setDossierError(String(error)); }
   };
 
   useEffect(() => {
@@ -556,15 +564,15 @@ export function App() {
         <nav>
         <NavGroup icon={<MessageSquare />} label="Chats" count={String(conversations.length)}>{conversations.length ? conversations.map((conversation) => <div className={`chat-row ${conversation.id === activeConversationId ? "active" : ""}`} key={conversation.id}><button className="chat-select" onClick={() => { setMode("ask"); selectConversation(conversation.id); }}><MessageSquare size={12} /><span>{conversation.title}</span></button><button className="chat-action" aria-label={`Rename ${conversation.title}`} title="Rename conversation" onClick={() => void renameConversation(conversation)}><Pencil size={11} /></button><button className="chat-action danger" aria-label={`Delete ${conversation.title}`} title="Delete conversation" onClick={() => void deleteConversation(conversation)}><Trash2 size={11} /></button></div>) : <p className="empty-nav">No conversations yet</p>}{conversationError && <p className="nav-error" role="alert">{conversationError}</p>}</NavGroup>
         <NavGroup icon={<Database />} label="Assets" count={status.vault_mounted ? String(assetCount) : "—"}><button className={`nav-row asset-nav-row${activeView === "assets" ? " active" : ""}`} disabled={!status.vault_mounted} onClick={openAssets}><Database size={13} /> Open asset library</button><button className="nav-row" disabled={!status.vault_mounted} onClick={openSource}><Plus size={13} /> Add source</button></NavGroup>
-        <NavGroup icon={<BookOpen />} label="Dossiers" count="0" />
+        <NavGroup icon={<BookOpen />} label="Dossiers" count={String(dossiers.length)}><button className={`nav-row${activeView === "dossiers" ? " active" : ""}`} disabled={!status.vault_mounted} onClick={() => void openDossiers()}><BookOpen size={13} /> Evidence quality</button></NavGroup>
         <NavGroup icon={<FolderKey />} label="Workspaces" count="0"><button className="nav-row"><Plus size={13} /> Approve directory</button></NavGroup>
       </nav>
       <div className={`vault-card ${status.vault_mounted ? "ready" : "locked"}`}><ShieldCheck size={17} /><div><strong>{status.vault_mounted ? "Vault unlocked" : status.vault_registered ? "Vault registered" : "Vault locked"}</strong><small>{status.vault_mounted ? "Encrypted storage available" : status.vault_registered ? "Waiting for encrypted storage to unlock" : "Setup required before data can be retained"}</small></div></div>
     </aside>
 
     <section className="centre-panel" id="conversation" aria-label="Conversation">
-      <div className="topbar"><div className="crumb">Retained knowledge <ChevronRight size={13} /> <span>{activeView === "assets" ? "Asset library" : mode === "ask" ? "Cited answer" : "Lexical search"}</span></div><div className="topbar-actions"><button type="button" className="ambient-launcher" onClick={openAmbient} disabled={!IS_TAURI} title="Open Ambient ALMA"><Sparkles size={13} /> Ambient</button>{activeView === "assets" ? <button type="button" className="asset-back" onClick={openConversation}><ArrowLeft size={13} /> Back to chat</button> : <div className="mode-switch" role="group" aria-label="Conversation mode"><button className={mode === "ask" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("ask"); setSearchHits([]); setSearchError(""); }} aria-pressed={mode === "ask"}>Ask</button><button className={mode === "search" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("search"); setAskError(""); }} aria-pressed={mode === "search"}><Search size={13} /> Search</button></div>}</div></div>
-      {activeView === "assets" ? <AssetLibrary refreshKey={assetRefreshKey} vaultMounted={status.vault_mounted} onAddSource={openSource} onRemoveSource={removeSource} onSetWatching={setSourceWatching} onOpenCitation={(uri) => void showCitation(uri)} onOpenOcr={openOcr} /> : <>
+      <div className="topbar"><div className="crumb">Retained knowledge <ChevronRight size={13} /> <span>{activeView === "assets" ? "Asset library" : activeView === "dossiers" ? "Evidence dossiers" : mode === "ask" ? "Cited answer" : "Lexical search"}</span></div><div className="topbar-actions"><button type="button" className="ambient-launcher" onClick={openAmbient} disabled={!IS_TAURI} title="Open Ambient ALMA"><Sparkles size={13} /> Ambient</button>{activeView !== "conversation" ? <button type="button" className="asset-back" onClick={openConversation}><ArrowLeft size={13} /> Back to chat</button> : <div className="mode-switch" role="group" aria-label="Conversation mode"><button className={mode === "ask" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("ask"); setSearchHits([]); setSearchError(""); }} aria-pressed={mode === "ask"}>Ask</button><button className={mode === "search" ? "active" : ""} onClick={() => { invalidateAskView(); setMode("search"); setAskError(""); }} aria-pressed={mode === "search"}><Search size={13} /> Search</button></div>}</div></div>
+      {activeView === "assets" ? <AssetLibrary refreshKey={assetRefreshKey} vaultMounted={status.vault_mounted} onAddSource={openSource} onRemoveSource={removeSource} onSetWatching={setSourceWatching} onOpenCitation={(uri) => void showCitation(uri)} onOpenOcr={openOcr} /> : activeView === "dossiers" ? <DossierLibrary dossiers={dossiers} error={dossierError} onRefresh={() => void openDossiers()} onCitation={(uri) => void showCitation(uri)} /> : <>
       <div className="conversation" ref={conversationRef} role="region" aria-label="Conversation and search results" tabIndex={0}>
         <div className="entity-stage"><AsciiEntity state={entityState} reducedMotion={reducedMotion} /><span className={`state-pill ${entityState}`} aria-live="polite"><i /> ALMA · {entityState}</span></div>
         {expressionDebugEnabled && <details className="expression-lab" open={debugExpression !== null}>
@@ -727,6 +735,48 @@ function compactCitationLabel(citation: string, index: number) {
   const coordinate = citation.match(/^pinky:\/\/source\/[^/]+\/version\/[^#]+#(.+)$/)?.[1];
   const readableCoordinate = coordinate?.replace(/^chunk-/, "chunk ");
   return readableCoordinate ? `Source ${index + 1} · ${readableCoordinate}` : `Source ${index + 1}`;
+}
+
+function DossierLibrary({ dossiers, error, onRefresh, onCitation }: { dossiers: TopicDossier[]; error: string; onRefresh: () => void; onCitation: (uri: string) => void }) {
+  const percent = (value: number) => `${Math.round(value * 100)}%`;
+  const [refreshSchedule, setRefreshSchedule] = useState<RefreshSchedule | null>(null);
+  const [topic, setTopic] = useState(""); const [subject, setSubject] = useState(""); const [predicate, setPredicate] = useState(""); const [object, setObject] = useState(""); const [supporting, setSupporting] = useState(""); const [contradicting, setContradicting] = useState(""); const [inferred, setInferred] = useState(false); const [captureError, setCaptureError] = useState(""); const [capturing, setCapturing] = useState(false); const [extractionQuery, setExtractionQuery] = useState(""); const [extracting, setExtracting] = useState(false); const [unresolvedQuestion, setUnresolvedQuestion] = useState("");
+  const capture = async (event: FormEvent) => {
+    event.preventDefault(); setCaptureError(""); setCapturing(true);
+    try {
+      const evidence = [{ citation_uri: supporting.trim(), relationship: "supporting" }];
+      if (contradicting.trim()) evidence.push({ citation_uri: contradicting.trim(), relationship: "contradicting" });
+      await invoke("record_source_grounded_claim", { claim: { schema_version: 1, topic: topic.trim(), subject: subject.trim(), predicate: predicate.trim(), object: object.trim(), inferred, evidence } });
+      setSubject(""); setPredicate(""); setObject(""); setSupporting(""); setContradicting(""); onRefresh();
+    } catch (error) { setCaptureError(String(error)); }
+    finally { setCapturing(false); }
+  };
+  const extract = async (event: FormEvent) => {
+    event.preventDefault(); setCaptureError(""); setExtracting(true);
+    try {
+      await invoke("extract_source_grounded_claims", { request: { topic: topic.trim(), query: extractionQuery.trim() } });
+      setExtractionQuery(""); onRefresh();
+    } catch (error) { setCaptureError(String(error)); }
+    finally { setExtracting(false); }
+  };
+  const addUnresolvedQuestion = async (event: FormEvent) => {
+    event.preventDefault(); setCaptureError("");
+    const dossier = dossiers.find((item) => item.label.toLowerCase() === topic.trim().toLowerCase());
+    if (!dossier) { setCaptureError("Create or select a topic dossier before adding an unresolved question."); return; }
+    try { await invoke("set_topic_unresolved_questions", { topicId: dossier.topic_id, questions: [...dossier.unresolved_questions, unresolvedQuestion.trim()] }); setUnresolvedQuestion(""); onRefresh(); }
+    catch (error) { setCaptureError(String(error)); }
+  };
+  useEffect(() => { if (IS_TAURI) void invoke<RefreshSchedule>("due_source_refreshes").then(setRefreshSchedule).catch(() => undefined); }, []);
+  return <section className="asset-library" aria-label="Evidence dossiers">
+    <header className="asset-library-header"><div><p className="eyebrow">EVIDENCE QUALITY</p><h1>Topic dossiers</h1><p>Scores are calculated from retained supporting and contradicting evidence.{refreshSchedule && ` ${refreshSchedule.due_source_ids.length} stale source${refreshSchedule.due_source_ids.length === 1 ? "" : "s"} eligible for the bounded R11 refresh workflow.`}</p></div><button type="button" className="asset-icon-button" onClick={onRefresh} aria-label="Refresh dossiers"><RefreshCw size={14} /></button></header>
+    {error && <div className="asset-error" role="alert"><strong>Could not load dossiers</strong><p>{error}</p></div>}
+    {!error && !dossiers.length && <div className="asset-empty"><BookOpen size={25} /><strong>No dossiers yet</strong><p>Source-grounded claim extraction will create a dossier when it finds retained evidence.</p></div>}
+    <form className="asset-toolbar" onSubmit={extract} aria-label="Extract source-grounded claims"><label className="asset-filter">Topic<input required value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="Topic" /></label><label className="asset-filter">Evidence search<input required value={extractionQuery} onChange={(event) => setExtractionQuery(event.target.value)} placeholder="Find retained passages" /></label><button className="asset-action" disabled={extracting}>{extracting ? "Extracting…" : "Extract retained claims"}</button></form>
+    <form className="asset-toolbar" onSubmit={addUnresolvedQuestion} aria-label="Manage unresolved dossier questions"><label className="asset-filter">Unresolved question<input required value={unresolvedQuestion} onChange={(event) => setUnresolvedQuestion(event.target.value)} placeholder="Question for the named topic" /></label><button className="asset-action">Add unresolved question</button></form>
+    <form className="asset-toolbar" onSubmit={capture} aria-label="Review or correct a source-grounded claim"><label className="asset-filter">Subject<input required value={subject} onChange={(event) => setSubject(event.target.value)} placeholder="Subject" /></label><label className="asset-filter">Relation<input required value={predicate} onChange={(event) => setPredicate(event.target.value)} placeholder="e.g. supports" /></label><label className="asset-filter">Object<input required value={object} onChange={(event) => setObject(event.target.value)} placeholder="Object" /></label><label className="asset-filter">Supporting citation<input required value={supporting} onChange={(event) => setSupporting(event.target.value)} placeholder="pinky://source/..." /></label><label className="asset-filter">Contradicting citation <small>(optional)</small><input value={contradicting} onChange={(event) => setContradicting(event.target.value)} placeholder="pinky://source/..." /></label><label className="asset-filter"><input type="checkbox" checked={inferred} onChange={(event) => setInferred(event.target.checked)} /> Inferred / review needed</label><button className="asset-action" disabled={capturing}>{capturing ? "Capturing…" : "Capture correction"}</button></form>
+    {captureError && <div className="asset-error" role="alert"><strong>Claim was not captured</strong><p>{captureError}</p></div>}
+    <div className="asset-results list">{dossiers.map((dossier) => <article className="asset-card" key={dossier.topic_id}><div className="asset-main"><span className="asset-type">DOS</span><span className="asset-copy"><strong>{dossier.label}</strong><small>Coverage {percent(dossier.metrics.coverage)} · authority {percent(dossier.metrics.authority)} · independence {percent(dossier.metrics.independence)} · freshness {percent(dossier.metrics.freshness)} · unresolved {percent(dossier.unresolved_question_score)}</small><small>{dossier.metrics.disputed ? "Disputed evidence retained" : "No retained contradiction"}</small>{dossier.warnings.map((warning) => <small key={warning}>Warning: {warning}</small>)}{dossier.unresolved_questions.map((question) => <small key={question}>Unresolved: {question}</small>)}{dossier.claims.map((claim) => <div className="answer-claims" key={claim.claim_id}><article><div className="claim-label"><strong>{claim.status}</strong><span>{claim.inferred ? "Inference — review required" : "Direct retained claim"}</span></div><p>{claim.statement}</p>{claim.warnings.map((warning) => <small key={warning}>Warning: {warning}</small>)}<CitationLinks citations={claim.evidence.map((item) => item.citation_uri)} onCitation={onCitation} label="Claim evidence" /><small>{claim.evidence.map((item) => item.relationship).join(" · ")}</small></article></div>)}</span></div></article>)}</div>
+  </section>;
 }
 
 function AssetLibrary({ refreshKey, vaultMounted, onAddSource, onRemoveSource, onSetWatching, onOpenCitation, onOpenOcr }: { refreshKey: number; vaultMounted: boolean; onAddSource: () => void; onRemoveSource: (source: SourceSummary) => void; onSetWatching: (source: SourceSummary, paused: boolean) => void; onOpenCitation: (uri: string) => void; onOpenOcr: (source: SourceSummary) => void }) {

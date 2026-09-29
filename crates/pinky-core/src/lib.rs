@@ -5,6 +5,7 @@
 //! boundary.
 
 pub mod artifact;
+pub mod claims;
 pub mod conversation;
 pub mod database;
 pub mod embedding;
@@ -32,6 +33,14 @@ pub use artifact::{
     parse_trusted_artifact_keys_json, ArtifactDigest, ArtifactError, ArtifactKind,
     ArtifactManifestV1, SignedArtifactManifestV1, TrustedArtifactKey,
     ARTIFACT_MANIFEST_SCHEMA_VERSION,
+};
+pub use claims::{
+    assess_claim, claim_warnings, drafts_from_indexed_proposals, extract_retained_claims,
+    schedule_refreshes, ClaimDraftV1, ClaimError, ClaimEvidenceV1, ClaimReviewV1, ClaimStatusV1,
+    ClaimStore, DossierMetricsV1, EvidenceRelationshipV1, IndexedClaimExtractionResponseV1,
+    IndexedClaimProposalV1, PersistedClaim, RefreshCandidateV1, RefreshScheduleV1, TopicDossierV1,
+    CLAIM_SCHEMA_VERSION, MAX_CLAIM_EVIDENCE, MAX_DOSSIER_REFRESHES, MAX_ENTITY_ALIASES,
+    MAX_EXTRACTED_CLAIMS, MAX_UNRESOLVED_QUESTIONS, STALE_AFTER_DAYS,
 };
 pub use conversation::{
     ConversationDetail, ConversationError, ConversationMessage, ConversationService,

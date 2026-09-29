@@ -5,8 +5,13 @@ This file is the acceptance ledger for the Pinky implementation specification.
 See [`ROADMAP.md`](ROADMAP.md) for the ordered plan and entry/exit criteria for
 the remaining milestones.
 
-Phase gate: R9 private-host acceptance passed on 2026-09-29. R10 is now the
-next eligible development phase; later phases remain ordered by the roadmap.
+Acceptance criteria are locked by the roadmap: this ledger records evidence
+and status, but must never alter, relax, or reinterpret a milestone's
+Deliverables or Exit gate during implementation.
+
+Phase gate: R10 is complete against the explicit evidence-extraction,
+durable-scheduling, desktop, and acceptance criteria in `ROADMAP.md`. R11 is
+now the next eligible phase; its separate criteria remain unmet.
 
 ## Stage 1 — foundation
 
@@ -92,6 +97,17 @@ next eligible development phase; later phases remain ordered by the roadmap.
 - [x] Pinky Lite reliability path: interrupted-task recovery, bounded retry for
   recoverable model transport failures, reconnect guidance, and validated
   cancellation/error handling
+- [x] R10 claims and evidence-quality integration: retained-citation-only claim
+  persistence, contradiction-preserving evidence, entity aliases and
+  relationships, consolidated dossier scoring, bounded stale-source refresh
+  selection, and derived disputed/stale/single-source/inferred warnings. The
+  fixed R10 gate passed on 2026-09-29: indexed retained-evidence extraction,
+  deterministic direct/inferred validation, conflict-preserving dossiers,
+  durable refresh selection, SQLCipher-persisted dossier scores, desktop
+  review/display controls, cancellation, and restart fixtures passed.
+  `cargo test --workspace` passed (162 core,
+  12 desktop-native, and 2 offline restart tests); frontend unit/build and
+  native WebDriver smoke checks also passed.
 
 ## Verification on this checkout
 

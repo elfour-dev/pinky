@@ -100,6 +100,11 @@ export interface AnswerEnvelope {
   warnings: string[];
   unresolved_gaps: string[];
 }
+export interface DossierMetrics { coverage: number; authority: number; independence: number; freshness: number; disputed: boolean; }
+export interface ClaimEvidence { citation_uri: string; relationship: "supporting" | "contradicting"; }
+export interface ClaimReview { claim_id: string; statement: string; status: "supported" | "disputed"; inferred: boolean; warnings: string[]; evidence: ClaimEvidence[]; }
+export interface TopicDossier { topic_id: string; label: string; metrics: DossierMetrics; unresolved_questions: string[]; unresolved_question_score: number; warnings: string[]; claims: ClaimReview[]; }
+export interface RefreshSchedule { due_source_ids: string[]; skipped_over_budget: number; }
 export interface ConversationSummary {
   id: string;
   title: string;
